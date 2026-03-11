@@ -25,10 +25,12 @@
   let cachedMessages = [];
   let suppressObserver = false;
   let lifecycleTimer = null;
+  let errorGuardInstalled = false;
 
   boot().catch((error) => handleContextError(error));
 
   async function boot() {
+    installGlobalErrorGuards();
     if (!isExtensionContextAlive()) return;
     await loadState();
     normalizeState();
@@ -138,7 +140,11 @@
   }
 
   function isExtensionContextAlive() {
-    return typeof chrome !== "undefined" && Boolean(chrome.runtime && chrome.runtime.id && chrome.storage && chrome.storage.local);
+    try {
+      return typeof chrome !== "undefined" && Boolean(chrome.runtime && chrome.runtime.id && chrome.storage && chrome.storage.local);
+    } catch (error) {
+      return false;
+    }
   }
 
   function isContextInvalidatedError(error) {
@@ -151,6 +157,21 @@
       return;
     }
     console.error("[cg-branch-map] unexpected error", error);
+  }
+
+  function installGlobalErrorGuards() {
+    if (errorGuardInstalled) return;
+    errorGuardInstalled = true;
+    window.addEventListener("unhandledrejection", (event) => {
+      if (isContextInvalidatedError(event.reason)) {
+        event.preventDefault();
+      }
+    });
+    window.addEventListener("error", (event) => {
+      if (isContextInvalidatedError(event.error || event.message)) {
+        event.preventDefault();
+      }
+    });
   }
 
   async function safeStorageGet(keys) {
@@ -551,27 +572,36 @@
   }
 
   async function handleBranchLifecycle() {
-    const global = await getGlobalStorage([GLOBAL_BRANCH_PENDING_KEY, GLOBAL_BRANCH_LINEAGE_KEY]);
-    const pending = global[GLOBAL_BRANCH_PENDING_KEY];
-    if (!pending) {
-      return;
-    }
-
-    if (pending.status === "awaiting_child_url") {
-      if (conversationId === "temporary-chat" || conversationId === pending.sourceConversationId) {
+    try {
+      if (!isExtensionContextAlive()) return;
+      const global = await getGlobalStorage([GLOBAL_BRANCH_PENDING_KEY, GLOBAL_BRANCH_LINEAGE_KEY]);
+      const pending = global[GLOBAL_BRANCH_PENDING_KEY];
+      if (!pending) {
         return;
       }
-      const lineage = global[GLOBAL_BRANCH_LINEAGE_KEY] || {};
-      lineage[conversationId] = {
-        parentConversationId: pending.sourceConversationId,
-        parentNodeId: pending.sourceNodeId,
-        createdAt: new Date().toISOString()
-      };
-      await setGlobalStorage({
-        [GLOBAL_BRANCH_LINEAGE_KEY]: lineage,
-        [GLOBAL_BRANCH_PENDING_KEY]: null
-      });
-      showToast("分支已在当前页创建，可随时返回父会话。");
+
+      if (pending.status === "awaiting_child_url") {
+        if (conversationId === "temporary-chat" || conversationId === pending.sourceConversationId) {
+          return;
+        }
+        const lineage = global[GLOBAL_BRANCH_LINEAGE_KEY] || {};
+        lineage[conversationId] = {
+          parentConversationId: pending.sourceConversationId,
+          parentNodeId: pending.sourceNodeId,
+          createdAt: new Date().toISOString()
+        };
+        await setGlobalStorage({
+          [GLOBAL_BRANCH_LINEAGE_KEY]: lineage,
+          [GLOBAL_BRANCH_PENDING_KEY]: null
+        });
+        showToast("分支已在当前页创建，可随时返回父会话。");
+      }
+    } catch (error) {
+      handleContextError(error);
+      if (isContextInvalidatedError(error)) {
+        return;
+      }
+      throw error;
     }
   }
 
@@ -634,21 +664,30 @@
   }
 
   async function maybeApplyReturnTarget() {
-    if (conversationId === "temporary-chat") {
-      return;
-    }
-    const global = await getGlobalStorage([GLOBAL_RETURN_TARGET_KEY]);
-    const target = global[GLOBAL_RETURN_TARGET_KEY];
-    if (!target || target.targetConversationId !== conversationId) {
-      return;
-    }
+    try {
+      if (!isExtensionContextAlive()) return;
+      if (conversationId === "temporary-chat") {
+        return;
+      }
+      const global = await getGlobalStorage([GLOBAL_RETURN_TARGET_KEY]);
+      const target = global[GLOBAL_RETURN_TARGET_KEY];
+      if (!target || target.targetConversationId !== conversationId) {
+        return;
+      }
 
-    appState.selectedNodeId = target.targetNodeId || appState.selectedNodeId;
-    await saveState();
-    await setGlobalStorage({ [GLOBAL_RETURN_TARGET_KEY]: null });
-    const node = appState.nodes.find((item) => item.id === appState.selectedNodeId);
-    if (node) {
-      setTimeout(() => jumpToNode(node), 350);
+      appState.selectedNodeId = target.targetNodeId || appState.selectedNodeId;
+      await saveState();
+      await setGlobalStorage({ [GLOBAL_RETURN_TARGET_KEY]: null });
+      const node = appState.nodes.find((item) => item.id === appState.selectedNodeId);
+      if (node) {
+        setTimeout(() => jumpToNode(node), 350);
+      }
+    } catch (error) {
+      handleContextError(error);
+      if (isContextInvalidatedError(error)) {
+        return;
+      }
+      throw error;
     }
   }
 
