@@ -1487,9 +1487,7 @@
   function countQuestionMessages(messages) {
     return messages.filter((message) => {
       if (message.role !== "user") return false;
-      const text = cleanText(message.text);
-      if (!text) return false;
-      return /[?？]|\b(怎么|如何|为什么|是否|能否|请问|what|how|why|can|could)\b/i.test(text.slice(0, 220));
+      return Boolean(cleanText(message.text));
     }).length;
   }
 
