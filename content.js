@@ -959,15 +959,33 @@
       if (!item) return false;
       const anchor = item.closest("a[href]") || item.querySelector?.("a[href]");
       if (anchor && anchor.href) {
-        const opened = window.open(anchor.href, "_blank", "noopener,noreferrer");
-        if (!opened) {
-          // popup 被拦截时回退到当前页跳转
-          location.assign(anchor.href);
-        }
+        // 强制同 tab：更符合本插件“不中断”体验，也规避 popup 拦截
+        location.assign(anchor.href);
         return true;
       }
-      // 无 href 时走 ChatGPT 原生分支逻辑
-      safeClick(item);
+
+      // 无 href 时，拦截可能的 window.open，转成同 tab 跳转
+      const originalOpen = window.open;
+      let capturedUrl = "";
+      window.open = function patchedOpen(url, ...args) {
+        if (typeof url === "string" && url) {
+          capturedUrl = url;
+          location.assign(url);
+          return window;
+        }
+        return originalOpen.apply(window, [url, ...args]);
+      };
+      try {
+        safeClick(item);
+      } finally {
+        window.open = originalOpen;
+      }
+      // 兼容某些菜单项必须键盘确认
+      if (!capturedUrl) {
+        const target = item.closest("[role='menuitem'],button,a,div") || item;
+        target.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+        target.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true, cancelable: true }));
+      }
       return true;
     };
 
