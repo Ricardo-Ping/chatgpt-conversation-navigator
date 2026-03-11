@@ -1417,7 +1417,7 @@
     rootEl.dataset.minimal = "true";
     rootEl.dataset.collapsed = "false";
     rootEl.style.width = "84px";
-    rootEl.style.height = "236px";
+    rootEl.style.height = "300px";
     applyCompactDockPosition();
     rootEl.innerHTML = "";
 
@@ -1446,7 +1446,19 @@
     next.textContent = "下";
     next.onclick = () => jumpNeighborMessage(1);
 
-    dock.append(expand, prev, next);
+    const top = document.createElement("button");
+    top.type = "button";
+    top.className = "cg-branch-mini-dock-btn";
+    top.textContent = "顶部";
+    top.onclick = () => scrollChatTo(0);
+
+    const bottom = document.createElement("button");
+    bottom.type = "button";
+    bottom.className = "cg-branch-mini-dock-btn";
+    bottom.textContent = "底部";
+    bottom.onclick = () => scrollChatTo("bottom");
+
+    dock.append(expand, top, bottom, prev, next);
     rootEl.appendChild(dock);
     installCompactDockDrag(dock);
   }
@@ -1755,6 +1767,16 @@
       return;
     }
     const current = getCurrentViewportMessageIndex(stepMessages);
+    if (direction < 0 && current <= 0) {
+      showToast("已经到第一条提问。");
+      jumpToMessage(stepMessages[0]);
+      return;
+    }
+    if (direction > 0 && current >= stepMessages.length - 1) {
+      showToast("已经到最后一条提问。");
+      jumpToMessage(stepMessages[stepMessages.length - 1]);
+      return;
+    }
     const next = clamp(current + direction, 0, stepMessages.length - 1);
     jumpToMessage(stepMessages[next]);
   }
