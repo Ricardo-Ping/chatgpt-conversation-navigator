@@ -714,13 +714,110 @@
     return appState.nodes.find((node) => node.id === appState.selectedNodeId) || appState.nodes[appState.nodes.length - 1];
   }
 
+  function getBranchCandidatesFromTaggedNodes() {
+    const candidates = appState.nodes
+      .map((node) => ({ node, message: getMessageFromNode(node) }))
+      .filter((item) => item.message && item.message.element)
+      .map((item) => ({
+        node: item.node,
+        message: item.message,
+        title: autoTitle(item.message.text, item.message.role),
+        snippet: cleanText(item.message.text).slice(0, 120)
+      }));
+    candidates.sort((a, b) => new Date(a.node.createdAt || 0) - new Date(b.node.createdAt || 0));
+    return candidates;
+  }
+
+  function pickBranchCandidate(candidates) {
+    return new Promise((resolve) => {
+      const old = document.querySelector(".cg-branch-picker-mask");
+      if (old) old.remove();
+
+      const mask = document.createElement("div");
+      mask.className = "cg-branch-picker-mask";
+      const panel = document.createElement("div");
+      panel.className = "cg-branch-picker-panel";
+
+      const title = document.createElement("div");
+      title.className = "cg-branch-picker-title";
+      title.textContent = "选择开分支节点";
+      const sub = document.createElement("div");
+      sub.className = "cg-branch-picker-subtitle";
+      sub.textContent = `检测到 ${candidates.length} 个已设节点，请选择一个作为分支起点。`;
+
+      const list = document.createElement("div");
+      list.className = "cg-branch-picker-list";
+
+      candidates.forEach((item, index) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "cg-branch-picker-item";
+        btn.innerHTML = `<span>${index + 1}</span><strong>${escapeHtml(item.title || "未命名节点")}</strong><em>${escapeHtml(item.snippet || "")}</em>`;
+        btn.onclick = () => close(item);
+        list.appendChild(btn);
+      });
+
+      const actions = document.createElement("div");
+      actions.className = "cg-branch-picker-actions";
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "cg-branch-picker-cancel";
+      cancel.textContent = "取消";
+      cancel.onclick = () => close(null);
+      actions.appendChild(cancel);
+
+      panel.append(title, sub, list, actions);
+      mask.appendChild(panel);
+      document.body.appendChild(mask);
+
+      const onKey = (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          close(null);
+        }
+      };
+      window.addEventListener("keydown", onKey);
+      mask.addEventListener("click", (event) => {
+        if (event.target === mask) close(null);
+      });
+
+      function close(value) {
+        window.removeEventListener("keydown", onKey);
+        mask.classList.add("cg-branch-picker-leave");
+        setTimeout(() => {
+          if (mask.parentNode) mask.parentNode.removeChild(mask);
+          resolve(value);
+        }, 150);
+      }
+    });
+  }
+
   async function openBranchInCurrentTab() {
     if (branchOpening) {
       showToast("正在尝试打开分支，请稍候...");
       return;
     }
-    const node = getSelectedNode();
-    const baseMessage = node ? getMessageFromNode(node) : getViewportMessage();
+    let node = null;
+    let baseMessage = null;
+    const candidates = getBranchCandidatesFromTaggedNodes();
+    if (candidates.length > 1) {
+      const selected = await pickBranchCandidate(candidates);
+      if (!selected) {
+        showToast("已取消开分支。");
+        return;
+      }
+      node = selected.node;
+      baseMessage = selected.message;
+      appState.selectedNodeId = node.id;
+      await saveState();
+      render();
+    } else if (candidates.length === 1) {
+      node = candidates[0].node;
+      baseMessage = candidates[0].message;
+    } else {
+      node = getSelectedNode();
+      baseMessage = node ? getMessageFromNode(node) : getViewportMessage();
+    }
     if (!baseMessage) {
       showToast("没有找到可用于开分支的消息。");
       return;
