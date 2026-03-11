@@ -478,11 +478,19 @@
         });
       }
 
-      const exists = appState.nodes.find((n) => n.messageKey === message.key || (n.messageHash === message.hash && n.role === message.role));
+      const exists = appState.nodes.find((n) =>
+        n.messageKey === message.key ||
+        (n.anchorId && message.anchorId && n.anchorId === message.anchorId) ||
+        (n.messageHash === message.hash && n.role === message.role)
+      );
       if (exists) {
+        if (host._cgTagHideTimer) {
+          clearTimeout(host._cgTagHideTimer);
+          host._cgTagHideTimer = null;
+        }
         host.classList.add("cg-branch-tag-host-pinned");
         host.classList.add("cg-branch-tag-host-visible");
-        button.textContent = "已建节点";
+        button.textContent = "已设节点";
       } else {
         host.classList.remove("cg-branch-tag-host-pinned");
         button.textContent = "设为节点";
