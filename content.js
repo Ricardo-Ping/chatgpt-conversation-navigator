@@ -273,6 +273,13 @@
 
   function cleanText(text) { return String(text || "").replace(/\s+/g, " ").trim(); }
 
+  function readMessageText(el) {
+    if (!el) return "";
+    const cloned = el.cloneNode(true);
+    cloned.querySelectorAll(".cg-branch-tag-btn").forEach((btn) => btn.remove());
+    return cleanText(cloned.innerText || cloned.textContent || "");
+  }
+
   function simpleHash(text) {
     let hash = 0;
     for (let i = 0; i < text.length; i += 1) {
@@ -290,7 +297,7 @@
 
     candidates.forEach((el, index) => {
       const role = getRole(el) || (index % 2 === 0 ? "user" : "assistant");
-      const text = cleanText(el.innerText || el.textContent || "");
+      const text = readMessageText(el);
       if (!text) return;
       const turnHost = el.closest && el.closest('article[data-testid^="conversation-turn-"],article[data-testid*="conversation-turn"]');
       const turnId = (turnHost && turnHost.getAttribute("data-testid")) || el.getAttribute("data-testid");
@@ -358,7 +365,7 @@
     document.querySelectorAll("main article").forEach((el) => {
       const container = normalizeMessageContainer(el);
       if (!container || seen.has(container)) return;
-      const text = cleanText(container.innerText || container.textContent || "");
+      const text = readMessageText(container);
       if (!text) return;
       seen.add(container);
       fallback.push(container);
@@ -387,7 +394,7 @@
     if (!container.closest("main")) return null;
     if (!container || (container.closest && container.closest(`#${ROOT_ID}`))) return null;
     if (!isElementActuallyVisible(container)) return null;
-    const text = cleanText(container.innerText || container.textContent || "");
+    const text = readMessageText(container);
     if (!text) return null;
     return container;
   }
@@ -439,6 +446,12 @@
       host.classList.add("cg-branch-tag-host");
 
       let button = host.querySelector(".cg-branch-tag-btn");
+      if (message.role !== "assistant") {
+        if (button) button.remove();
+        host.classList.remove("cg-branch-tag-host-pinned");
+        host.classList.remove("cg-branch-tag-host-visible");
+        return;
+      }
       if (!button) {
         button = document.createElement("button");
         button.type = "button";
@@ -1207,6 +1220,7 @@
     list.className = "cg-lite-list";
     const allGroups = getNavigationGroups();
     const navGroups = filterNavigationGroups(allGroups, appState.searchQuery);
+    const nodeKeys = new Set(appState.nodes.map((node) => node.messageKey));
     if (!navGroups.length) {
       const empty = document.createElement("div");
       empty.className = "cg-lite-empty";
@@ -1227,7 +1241,16 @@
           const sub = document.createElement("button");
           sub.type = "button";
           sub.className = "cg-lite-item-sub";
-          sub.textContent = `ChatGPT：${autoTitle(group.assistant.text, group.assistant.role)}`;
+          if (nodeKeys.has(group.assistant.key)) {
+            sub.dataset.node = "true";
+            const marker = document.createElement("span");
+            marker.className = "cg-lite-node-marker";
+            marker.textContent = "✦";
+            sub.appendChild(marker);
+          }
+          const label = document.createElement("span");
+          label.textContent = `ChatGPT：${autoTitle(group.assistant.text, group.assistant.role)}`;
+          sub.appendChild(label);
           sub.title = cleanText(group.assistant.text).slice(0, 200);
           sub.onclick = (event) => {
             event.stopPropagation();
