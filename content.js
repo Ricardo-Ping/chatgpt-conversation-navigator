@@ -1017,20 +1017,35 @@
 
     const list = document.createElement("div");
     list.className = "cg-lite-list";
-    const questions = extractQuestionMessages();
-    if (!questions.length) {
+    const navGroups = getNavigationGroups();
+    if (!navGroups.length) {
       const empty = document.createElement("div");
       empty.className = "cg-lite-empty";
       empty.textContent = "暂无问题，点击“扫描”更新。";
       list.appendChild(empty);
     } else {
-      questions.forEach((message, index) => {
+      navGroups.forEach((group, index) => {
+        const primary = group.user || group.assistant;
+        if (!primary) return;
         const item = document.createElement("button");
         item.type = "button";
         item.className = "cg-lite-item";
-        item.title = cleanText(message.text).slice(0, 200);
-        item.innerHTML = `<span>${index + 1}</span><strong>${escapeHtml(autoTitle(message.text, message.role))}</strong>`;
-        item.onclick = () => jumpToMessage(message);
+        item.title = cleanText(primary.text).slice(0, 200);
+        item.innerHTML = `<span>${index + 1}</span><strong>${escapeHtml(`${primary.role === "assistant" ? "ChatGPT 说" : "你说"}：${autoTitle(primary.text, primary.role)}`)}</strong>`;
+        item.onclick = () => jumpToMessage(primary);
+
+        if (group.user && group.assistant) {
+          const sub = document.createElement("button");
+          sub.type = "button";
+          sub.className = "cg-lite-item-sub";
+          sub.textContent = `ChatGPT：${autoTitle(group.assistant.text, group.assistant.role)}`;
+          sub.title = cleanText(group.assistant.text).slice(0, 200);
+          sub.onclick = (event) => {
+            event.stopPropagation();
+            jumpToMessage(group.assistant);
+          };
+          item.appendChild(sub);
+        }
         list.appendChild(item);
       });
     }
@@ -1038,18 +1053,26 @@
     rootEl.appendChild(panel);
   }
 
-  function extractQuestionMessages() {
-    const messages = cachedMessages.length ? cachedMessages : findMessages();
-    const userMessages = messages.filter((message) => message.role === "user");
-    const questions = userMessages.filter((message) => {
-      if (message.role !== "user") return false;
-      const text = cleanText(message.text);
-      if (!text) return false;
-      return /[?？]|\b(怎么|如何|为什么|是否|能否|请问|what|how|why|can|could)\b/i.test(text.slice(0, 220));
+  function getNavigationMessages() {
+    return cachedMessages.length ? cachedMessages : findMessages();
+  }
+
+  function getNavigationGroups() {
+    const messages = getNavigationMessages();
+    const groups = [];
+    messages.forEach((message) => {
+      if (message.role === "user") {
+        groups.push({ user: message, assistant: null });
+        return;
+      }
+      const last = groups[groups.length - 1];
+      if (last && last.user && !last.assistant) {
+        last.assistant = message;
+        return;
+      }
+      groups.push({ user: null, assistant: message });
     });
-    if (questions.length) return questions;
-    if (userMessages.length) return userMessages;
-    return messages.slice(0, 12);
+    return groups;
   }
 
   function countQuestionMessages(messages) {
@@ -1351,62 +1374,85 @@
 
     const navMain = document.createElement("div");
     navMain.className = "cg-branch-nav-main";
-
-    const rail = document.createElement("div");
-    rail.className = "cg-branch-nav-rail-vertical";
-    if (!cachedMessages.length) {
-      rail.innerHTML = "<div class='cg-branch-nav-empty'>暂无消息导航</div>";
-      navMain.appendChild(rail);
-      wrap.appendChild(navMain);
-      return wrap;
-    }
-
-    const nodeKeys = new Set(appState.nodes.map((node) => node.messageKey));
-    const currentIndex = getCurrentViewportMessageIndex();
-    const total = cachedMessages.length;
-
-    const sampleLimit = 90;
-    const step = Math.max(1, Math.ceil(total / sampleLimit));
-    for (let i = 0; i < total; i += step) {
-      const message = cachedMessages[i];
-      const marker = document.createElement("button");
-      marker.type = "button";
-      marker.className = "cg-branch-nav-marker";
-      marker.style.top = `${Math.round((i / Math.max(1, total - 1)) * 100)}%`;
-      marker.title = `${i + 1}/${total} ${message.role === "assistant" ? "回答" : "提问"}: ${cleanText(message.text).slice(0, 56)}`;
-      marker.dataset.role = message.role;
-      if (nodeKeys.has(message.key)) {
-        marker.dataset.node = "true";
-      }
-      if (Math.abs(i - currentIndex) <= step - 1) {
-        marker.dataset.current = "true";
-      }
-      marker.onclick = () => jumpToMessage(message);
-      rail.appendChild(marker);
-    }
-
     const overview = document.createElement("div");
     overview.className = "cg-branch-nav-overview";
+
     const overviewTitle = document.createElement("div");
     overviewTitle.className = "cg-branch-nav-overview-title";
     overviewTitle.textContent = "对话概述";
     overview.appendChild(overviewTitle);
-    const previewCount = Math.min(6, cachedMessages.length);
-    for (let i = 0; i < previewCount; i += 1) {
-      const message = cachedMessages[i];
-      const line = document.createElement("button");
-      line.type = "button";
-      line.className = "cg-branch-nav-overview-item";
-      line.textContent = `${i + 1}. ${autoTitle(message.text, message.role)}`;
-      line.title = cleanText(message.text).slice(0, 140);
-      line.onclick = () => jumpToMessage(message);
-      overview.appendChild(line);
-    }
 
-    navMain.append(rail, overview);
+    const navList = document.createElement("div");
+    navList.className = "cg-branch-nav-overview-list";
+
+    const navMessages = getNavigationMessages();
+    const navGroups = getNavigationGroups();
+    const nodeKeys = new Set(appState.nodes.map((node) => node.messageKey));
+    const currentIndex = getCurrentViewportMessageIndex();
+    const currentMessage = navMessages[currentIndex] || null;
+
+    navGroups.forEach((group, index) => {
+      const primary = group.user || group.assistant;
+      if (!primary) return;
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "cg-branch-nav-overview-item";
+      row.title = cleanText(primary.text).slice(0, 160);
+      row.onclick = () => jumpToMessage(primary);
+
+      const dot = document.createElement("span");
+      dot.className = "cg-branch-nav-row-dot";
+      dot.dataset.role = group.user ? group.user.role : (group.assistant ? group.assistant.role : "assistant");
+      if ((group.user && nodeKeys.has(group.user.key)) || (group.assistant && nodeKeys.has(group.assistant.key))) {
+        dot.dataset.node = "true";
+      }
+      if (currentMessage && ((group.user && currentMessage.key === group.user.key) || (group.assistant && currentMessage.key === group.assistant.key))) {
+        dot.dataset.current = "true";
+      }
+
+      const text = document.createElement("span");
+      text.className = "cg-branch-nav-row-text";
+      text.textContent = `${index + 1}. ${primary.role === "assistant" ? "ChatGPT 说" : "你说"}：${autoTitle(primary.text, primary.role)}`;
+
+      row.append(dot, text);
+
+      if (group.user && group.assistant) {
+        const sub = document.createElement("button");
+        sub.type = "button";
+        sub.className = "cg-branch-nav-overview-sub";
+        sub.textContent = `ChatGPT：${autoTitle(group.assistant.text, group.assistant.role)}`;
+        sub.title = cleanText(group.assistant.text).slice(0, 160);
+        if (nodeKeys.has(group.assistant.key)) {
+          sub.dataset.node = "true";
+        }
+        if (currentMessage && currentMessage.key === group.assistant.key) {
+          sub.dataset.current = "true";
+        }
+        sub.onclick = (event) => {
+          event.stopPropagation();
+          jumpToMessage(group.assistant);
+        };
+        row.appendChild(sub);
+      }
+
+      navList.appendChild(row);
+    });
+
+    overview.appendChild(navList);
+
+    if (!navGroups.length) {
+      const empty = document.createElement("div");
+      empty.className = "cg-branch-nav-empty";
+      empty.textContent = "暂无消息导航";
+      overview.appendChild(empty);
+      navMain.appendChild(overview);
+      wrap.appendChild(navMain);
+      return wrap;
+    }
+    navMain.append(overview);
     const summary = document.createElement("div");
     summary.className = "cg-branch-nav-summary";
-    summary.textContent = `消息 ${total} 条`;
+    summary.textContent = `消息 ${navMessages.length} 条 · 对话组 ${navGroups.length}`;
     wrap.append(navMain, summary);
     return wrap;
   }
