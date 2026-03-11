@@ -918,17 +918,27 @@
     search.className = "cg-branch-search";
     search.placeholder = "搜索节点...";
     search.value = appState.searchQuery;
+    let imeComposing = false;
     search.onkeydown = (event) => {
       event.stopPropagation();
     };
-    search.onkeyup = (event) => {
-      event.stopPropagation();
-    };
-    search.onkeypress = (event) => {
-      event.stopPropagation();
-    };
+    search.addEventListener("compositionstart", () => {
+      imeComposing = true;
+    });
+    search.addEventListener("compositionend", (event) => {
+      imeComposing = false;
+      const inputEl = event.target;
+      appState.searchQuery = String(inputEl.value || "");
+      pendingSearchFocus = {
+        value: appState.searchQuery,
+        start: Number.isFinite(inputEl.selectionStart) ? inputEl.selectionStart : null,
+        end: Number.isFinite(inputEl.selectionEnd) ? inputEl.selectionEnd : null
+      };
+      render();
+    });
     search.oninput = (e) => {
       const inputEl = e.target;
+      if (imeComposing || e.isComposing) return;
       appState.searchQuery = String(inputEl.value || "");
       pendingSearchFocus = {
         value: appState.searchQuery,
@@ -1465,7 +1475,15 @@
     navList.className = "cg-branch-nav-overview-list";
 
     const navMessages = getNavigationMessages();
-    const navGroups = getNavigationGroups();
+    const allGroups = getNavigationGroups();
+    const query = cleanText(appState.searchQuery).toLowerCase();
+    const navGroups = !query
+      ? allGroups
+      : allGroups.filter((group) => {
+          const u = group.user ? `${group.user.text}\n${group.user.snippet || ""}`.toLowerCase() : "";
+          const a = group.assistant ? `${group.assistant.text}\n${group.assistant.snippet || ""}`.toLowerCase() : "";
+          return u.includes(query) || a.includes(query);
+        });
     const nodeKeys = new Set(appState.nodes.map((node) => node.messageKey));
     const currentIndex = getCurrentViewportMessageIndex();
     const currentMessage = navMessages[currentIndex] || null;
@@ -1531,7 +1549,9 @@
     navMain.append(overview);
     const summary = document.createElement("div");
     summary.className = "cg-branch-nav-summary";
-    summary.textContent = `消息 ${navMessages.length} 条 · 对话组 ${navGroups.length}`;
+    summary.textContent = query
+      ? `消息 ${navMessages.length} 条 · 对话组 ${navGroups.length}/${allGroups.length}`
+      : `消息 ${navMessages.length} 条 · 对话组 ${navGroups.length}`;
     wrap.append(navMain, summary);
     return wrap;
   }
