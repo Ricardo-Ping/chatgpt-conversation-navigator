@@ -901,6 +901,58 @@
 
   function installLiteEyeDrag(eyeEl) {
     eyeEl.style.touchAction = "none";
+    eyeEl.onpointerdown = null;
+
+    const maxX = () => Math.max(8, window.innerWidth - (eyeEl.offsetWidth || 58) - 8);
+    const maxY = () => Math.max(8, window.innerHeight - (eyeEl.offsetHeight || 42) - 8);
+
+    if (typeof window.interact === "function") {
+      if (eyeEl._cgInteract && typeof eyeEl._cgInteract.unset === "function") {
+        eyeEl._cgInteract.unset();
+      }
+
+      let dragging = false;
+      let x = clamp(rootEl.getBoundingClientRect().left, 8, maxX());
+      let y = clamp(rootEl.getBoundingClientRect().top, 8, maxY());
+
+      const dragApi = window.interact(eyeEl).draggable({
+        inertia: false,
+        listeners: {
+          start() {
+            dragging = false;
+            x = clamp(rootEl.getBoundingClientRect().left, 8, maxX());
+            y = clamp(rootEl.getBoundingClientRect().top, 8, maxY());
+            eyeEl.classList.add("cg-lite-eye-dragging");
+            eyeEl.dataset.dragMoved = "false";
+          },
+          move(event) {
+            dragging = true;
+            x = clamp(x + event.dx, 8, maxX());
+            y = clamp(y + event.dy, 8, maxY());
+            rootEl.style.left = `${x}px`;
+            rootEl.style.top = `${y}px`;
+            rootEl.style.right = "";
+          },
+          end() {
+            eyeEl.classList.remove("cg-lite-eye-dragging");
+            if (!dragging) return;
+            eyeEl.dataset.dragMoved = "true";
+            const side = x + (eyeEl.offsetWidth || 58) / 2 < window.innerWidth / 2 ? "left" : "right";
+            appState.liteDock.side = side;
+            appState.liteDock.y = clamp(y, 12, Math.max(12, window.innerHeight - 70));
+            appState.liteDock.x = null;
+            void saveState().then(() => render()).catch((error) => handleContextError(error));
+          }
+        }
+      });
+      eyeEl._cgInteract = dragApi;
+      return;
+    }
+
+    installLiteEyeDragFallback(eyeEl);
+  }
+
+  function installLiteEyeDragFallback(eyeEl) {
     let dragging = false;
     let startX = 0;
     let startY = 0;

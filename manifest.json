@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Branch Map",
-  "version": "0.1.0",
-  "description": "为 ChatGPT 对话提供分支节点、树状导航与回溯定位能力。",
+  "version": "0.1.1",
+  "description": "Branch map and navigation tools for ChatGPT conversations.",
   "permissions": [
     "storage"
   ],
@@ -17,6 +17,7 @@
         "https://chat.openai.com/*"
       ],
       "js": [
+        "lib/interact.min.js",
         "content.js"
       ],
       "css": [
