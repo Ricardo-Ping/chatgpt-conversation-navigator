@@ -728,6 +728,19 @@
     return candidates;
   }
 
+  function getQuestionOrderMap() {
+    const map = new Map();
+    const groups = getNavigationGroups();
+    let order = 0;
+    groups.forEach((group) => {
+      if (!group.user) return;
+      order += 1;
+      if (group.user && group.user.key) map.set(group.user.key, order);
+      if (group.assistant && group.assistant.key) map.set(group.assistant.key, order);
+    });
+    return map;
+  }
+
   function pickBranchCandidate(candidates) {
     return new Promise((resolve) => {
       const old = document.querySelector(".cg-branch-picker-mask");
@@ -747,12 +760,14 @@
 
       const list = document.createElement("div");
       list.className = "cg-branch-picker-list";
+      const orderMap = getQuestionOrderMap();
 
       candidates.forEach((item, index) => {
+        const order = orderMap.get(item.message.key) || (index + 1);
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "cg-branch-picker-item";
-        btn.innerHTML = `<span>${index + 1}</span><strong>${escapeHtml(item.title || "未命名节点")}</strong><em>${escapeHtml(item.snippet || "")}</em>`;
+        btn.innerHTML = `<span>${order}</span><strong>${escapeHtml(item.title || "未命名节点")}</strong><em>${escapeHtml(item.snippet || "")}</em>`;
         btn.onclick = () => close(item);
         list.appendChild(btn);
       });
@@ -844,8 +859,10 @@
     };
     branchOpening = true;
     try {
-      const started = await triggerNativeBranch(baseMessage);
+      const preOpenedWindow = window.open("about:blank", "_blank", "noopener,noreferrer");
+      const started = await triggerNativeBranch(baseMessage, preOpenedWindow);
       if (!started) {
+        if (preOpenedWindow && !preOpenedWindow.closed) preOpenedWindow.close();
         showToast("未找到“新聊天中的分支”入口，ChatGPT 页面结构可能已变化。");
         return;
       }
@@ -933,7 +950,7 @@
     return cachedMessages[idx] || cachedMessages[cachedMessages.length - 1];
   }
 
-  async function triggerNativeBranch(message) {
+  async function triggerNativeBranch(message, preOpenedWindow = null) {
     if (!message || !message.element) {
       return false;
     }
@@ -944,15 +961,44 @@
       if (!item) return false;
       const anchor = item.closest("a[href]") || item.querySelector?.("a[href]");
       if (anchor && anchor.href) {
-        const opened = window.open(anchor.href, "_blank", "noopener,noreferrer");
-        if (!opened) {
-          // popup 被拦截时回退到当前页跳转
-          location.assign(anchor.href);
+        if (preOpenedWindow && !preOpenedWindow.closed) {
+          preOpenedWindow.location.assign(anchor.href);
+        } else {
+          const opened = window.open(anchor.href, "_blank", "noopener,noreferrer");
+          if (!opened) {
+            // popup 被拦截时回退到当前页跳转
+            location.assign(anchor.href);
+          }
         }
         return true;
       }
-      // 走 ChatGPT 原生逻辑（通常会新开标签页创建分支）
-      safeClick(item);
+      let capturedUrl = "";
+      const originalOpen = window.open;
+      window.open = function patchedOpen(url, ...args) {
+        if (typeof url === "string" && url) {
+          capturedUrl = url;
+          if (preOpenedWindow && !preOpenedWindow.closed) {
+            preOpenedWindow.location.assign(url);
+            return preOpenedWindow;
+          }
+          const opened = originalOpen.call(window, url, "_blank", ...args);
+          if (!opened) {
+            location.assign(url);
+            return window;
+          }
+          return opened;
+        }
+        return originalOpen.apply(window, [url, ...args]);
+      };
+      try {
+        safeClick(item);
+      } finally {
+        window.open = originalOpen;
+      }
+      if (!capturedUrl && preOpenedWindow && !preOpenedWindow.closed) {
+        // 没有拿到 URL 时关闭预开页，避免留下 about:blank
+        preOpenedWindow.close();
+      }
       return true;
     };
 
@@ -1014,7 +1060,9 @@
   function findNativeBranchMenuItem() {
     const menus = Array.from(document.querySelectorAll('[role="menu"],[data-radix-popper-content-wrapper]'));
     const scope = menus.length ? menus : [document];
-    const items = scope.flatMap((root) => Array.from(root.querySelectorAll('[role="menuitem"],button,a,div')));
+    const items = scope
+      .flatMap((root) => Array.from(root.querySelectorAll('[role="menuitem"],button,a,div')))
+      .filter((el) => isElementActuallyVisible(el));
     return items.find((el) => {
       const txt = cleanText(el.textContent || "");
       return /新聊天中的分支|Branch in new chat|branch in new chat|分支对话|新聊天.*分支/i.test(txt);
