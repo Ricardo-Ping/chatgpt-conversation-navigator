@@ -27,6 +27,7 @@
   let lifecycleTimer = null;
   let errorGuardInstalled = false;
   let pendingSearchFocus = null;
+  let branchOpening = false;
 
   boot().catch((error) => handleContextError(error));
 
@@ -662,6 +663,10 @@
   }
 
   async function openBranchInCurrentTab() {
+    if (branchOpening) {
+      showToast("正在尝试打开分支，请稍候...");
+      return;
+    }
     const node = getSelectedNode();
     const baseMessage = node ? getMessageFromNode(node) : getViewportMessage();
     if (!baseMessage) {
@@ -669,20 +674,37 @@
       return;
     }
 
+    const global = await getGlobalStorage([GLOBAL_BRANCH_PENDING_KEY]);
+    const currentPending = global[GLOBAL_BRANCH_PENDING_KEY];
+    if (currentPending && currentPending.status === "awaiting_child_url") {
+      const createdAt = new Date(currentPending.createdAt || 0).getTime();
+      if (Date.now() - createdAt < 25000) {
+        showToast("已在等待新会话创建，请勿重复点击。");
+        return;
+      }
+      await setGlobalStorage({ [GLOBAL_BRANCH_PENDING_KEY]: null });
+    }
+
     const pending = {
       sourceConversationId: conversationId,
       sourceNodeId: node ? node.id : null,
       sourceMessageKey: baseMessage.key,
       status: "awaiting_child_url",
+      expiresAt: new Date(Date.now() + 25000).toISOString(),
       createdAt: new Date().toISOString()
     };
-    const started = await triggerNativeBranch(baseMessage);
-    if (!started) {
-      showToast("未找到“新聊天中的分支”入口，ChatGPT 页面结构可能已变化。");
-      return;
+    branchOpening = true;
+    try {
+      const started = await triggerNativeBranch(baseMessage);
+      if (!started) {
+        showToast("未找到“新聊天中的分支”入口，ChatGPT 页面结构可能已变化。");
+        return;
+      }
+      await setGlobalStorage({ [GLOBAL_BRANCH_PENDING_KEY]: pending });
+      showToast("已触发原生分支，正在等待新会话创建...");
+    } finally {
+      branchOpening = false;
     }
-    await setGlobalStorage({ [GLOBAL_BRANCH_PENDING_KEY]: pending });
-    showToast("已触发原生分支，正在等待新会话创建...");
   }
 
   async function returnToParentConversation() {
@@ -710,6 +732,11 @@
       const global = await getGlobalStorage([GLOBAL_BRANCH_PENDING_KEY, GLOBAL_BRANCH_LINEAGE_KEY]);
       const pending = global[GLOBAL_BRANCH_PENDING_KEY];
       if (!pending) {
+        return;
+      }
+      if (pending.expiresAt && Date.now() > new Date(pending.expiresAt).getTime()) {
+        await setGlobalStorage({ [GLOBAL_BRANCH_PENDING_KEY]: null });
+        showToast("分支创建超时，请重试“开分支”。");
         return;
       }
 
@@ -762,34 +789,72 @@
       return false;
     }
     const host = getButtonHost(message.element) || message.element;
+    const turnHost = host.closest("article") || host;
 
-    const moreBtn = host.querySelector('button[aria-label*="更多"],button[aria-label*="More"],button[data-testid*="more"],button[id*="radix-"][aria-haspopup="menu"]');
-    if (moreBtn) {
-      moreBtn.click();
-      await wait(120);
-      const nativeItem = findNativeBranchMenuItem();
-      if (nativeItem) {
-        nativeItem.click();
+    const tryOpenMenuAndClick = async (menuTrigger) => {
+      if (!menuTrigger) return false;
+      safeClick(menuTrigger);
+      await wait(260);
+      const item = findNativeBranchMenuItem();
+      if (item) {
+        safeClick(item);
         return true;
+      }
+      return false;
+    };
+
+    const selectors = [
+      'button[aria-label*="更多"]',
+      'button[aria-label*="More"]',
+      'button[data-testid*="more"]',
+      'button[data-testid*="message-actions"]',
+      'button[id*="radix-"][aria-haspopup="menu"]',
+      '[role="button"][aria-haspopup="menu"]'
+    ];
+
+    for (const selector of selectors) {
+      const local = Array.from(turnHost.querySelectorAll(selector)).filter((el) => isElementActuallyVisible(el));
+      for (const trigger of local) {
+        if (await tryOpenMenuAndClick(trigger)) return true;
+      }
+    }
+
+    turnHost.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, cancelable: true }));
+    await wait(220);
+    for (const selector of selectors) {
+      const local = Array.from(turnHost.querySelectorAll(selector)).filter((el) => isElementActuallyVisible(el));
+      for (const trigger of local) {
+        if (await tryOpenMenuAndClick(trigger)) return true;
       }
     }
 
     host.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: host.getBoundingClientRect().left + 16, clientY: host.getBoundingClientRect().top + 16 }));
-    await wait(120);
+    await wait(260);
     const fallbackItem = findNativeBranchMenuItem();
     if (fallbackItem) {
-      fallbackItem.click();
+      safeClick(fallbackItem);
       return true;
     }
     return false;
   }
 
   function findNativeBranchMenuItem() {
-    const items = Array.from(document.querySelectorAll('[role="menuitem"],button,div'));
+    const menus = Array.from(document.querySelectorAll('[role="menu"],[data-radix-popper-content-wrapper]'));
+    const scope = menus.length ? menus : [document];
+    const items = scope.flatMap((root) => Array.from(root.querySelectorAll('[role="menuitem"],button,a,div')));
     return items.find((el) => {
       const txt = cleanText(el.textContent || "");
-      return /新聊天中的分支|Branch in new chat/i.test(txt);
+      return /新聊天中的分支|Branch in new chat|分支/i.test(txt);
     }) || null;
+  }
+
+  function safeClick(el) {
+    if (!el) return;
+    const target = el.closest("button,a,[role='menuitem'],[role='button']") || el;
+    ["pointerdown", "mousedown", "mouseup", "pointerup", "click"].forEach((type) => {
+      target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
+    });
+    if (typeof target.click === "function") target.click();
   }
 
   function wait(ms) {
