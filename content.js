@@ -944,26 +944,15 @@
       if (!item) return false;
       const anchor = item.closest("a[href]") || item.querySelector?.("a[href]");
       if (anchor && anchor.href) {
-        location.assign(anchor.href);
+        const opened = window.open(anchor.href, "_blank", "noopener,noreferrer");
+        if (!opened) {
+          // popup 被拦截时回退到当前页跳转
+          location.assign(anchor.href);
+        }
         return true;
       }
-
-      const originalOpen = window.open;
-      let capturedUrl = null;
-      window.open = function patchedOpen(url, ...args) {
-        if (typeof url === "string" && url) {
-          capturedUrl = url;
-          location.assign(url);
-          return window;
-        }
-        return originalOpen.apply(this, [url, ...args]);
-      };
-      try {
-        safeClick(item);
-      } finally {
-        window.open = originalOpen;
-      }
-      if (capturedUrl) return true;
+      // 走 ChatGPT 原生逻辑（通常会新开标签页创建分支）
+      safeClick(item);
       return true;
     };
 
