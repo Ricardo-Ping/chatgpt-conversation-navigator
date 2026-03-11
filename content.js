@@ -827,7 +827,7 @@
     const currentPending = global[GLOBAL_BRANCH_PENDING_KEY];
     if (currentPending && currentPending.status === "awaiting_child_url") {
       const createdAt = new Date(currentPending.createdAt || 0).getTime();
-      if (Date.now() - createdAt < 25000) {
+      if (Date.now() - createdAt < 7000) {
         showToast("已在等待新会话创建，请勿重复点击。");
         return;
       }
@@ -940,25 +940,61 @@
     const host = getButtonHost(message.element) || message.element;
     const turnHost = host.closest("article") || host;
 
+    const clickBranchMenuItem = (item) => {
+      if (!item) return false;
+      const anchor = item.closest("a[href]") || item.querySelector?.("a[href]");
+      if (anchor && anchor.href) {
+        location.assign(anchor.href);
+        return true;
+      }
+
+      const originalOpen = window.open;
+      let capturedUrl = null;
+      window.open = function patchedOpen(url, ...args) {
+        if (typeof url === "string" && url) {
+          capturedUrl = url;
+          location.assign(url);
+          return window;
+        }
+        return originalOpen.apply(this, [url, ...args]);
+      };
+      try {
+        safeClick(item);
+      } finally {
+        window.open = originalOpen;
+      }
+      if (capturedUrl) return true;
+      return true;
+    };
+
     const tryOpenMenuAndClick = async (menuTrigger) => {
       if (!menuTrigger) return false;
       safeClick(menuTrigger);
-      await wait(260);
-      const item = findNativeBranchMenuItem();
-      if (item) {
-        safeClick(item);
-        return true;
+      const startAt = Date.now();
+      let item = null;
+      while (Date.now() - startAt < 1200) {
+        item = findNativeBranchMenuItem();
+        if (item) break;
+        await wait(80);
       }
+      if (item) {
+        return clickBranchMenuItem(item);
+      }
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       return false;
     };
 
     const selectors = [
       'button[aria-label*="更多"]',
       'button[aria-label*="More"]',
+      'button[aria-label*="Actions"]',
+      'button[aria-label*="操作"]',
       'button[data-testid*="more"]',
+      'button[data-testid*="actions"]',
       'button[data-testid*="message-actions"]',
       'button[id*="radix-"][aria-haspopup="menu"]',
-      '[role="button"][aria-haspopup="menu"]'
+      '[role="button"][aria-haspopup="menu"]',
+      'button[aria-haspopup="menu"]'
     ];
 
     for (const selector of selectors) {
@@ -981,8 +1017,7 @@
     await wait(260);
     const fallbackItem = findNativeBranchMenuItem();
     if (fallbackItem) {
-      safeClick(fallbackItem);
-      return true;
+      return clickBranchMenuItem(fallbackItem);
     }
     return false;
   }
@@ -993,7 +1028,7 @@
     const items = scope.flatMap((root) => Array.from(root.querySelectorAll('[role="menuitem"],button,a,div')));
     return items.find((el) => {
       const txt = cleanText(el.textContent || "");
-      return /新聊天中的分支|Branch in new chat|分支/i.test(txt);
+      return /新聊天中的分支|Branch in new chat|branch in new chat|分支对话|新聊天.*分支/i.test(txt);
     }) || null;
   }
 
