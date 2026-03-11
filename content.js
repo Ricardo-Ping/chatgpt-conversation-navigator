@@ -1296,6 +1296,17 @@
     branch.textContent = "分支";
     branch.onclick = () => openBranchInCurrentTab();
 
+    const lite = document.createElement("button");
+    lite.type = "button";
+    lite.className = "cg-branch-mini-dock-btn";
+    lite.textContent = "轻量";
+    lite.onclick = async () => {
+      appState.mode = "lite";
+      appState.minimalMode = false;
+      await saveState();
+      render();
+    };
+
     const back = document.createElement("button");
     back.type = "button";
     back.className = "cg-branch-mini-dock-btn";
@@ -1314,7 +1325,7 @@
     next.textContent = "下";
     next.onclick = () => jumpNeighborMessage(1);
 
-    dock.append(expand, branch, back, prev, next);
+    dock.append(expand, lite, branch, back, prev, next);
     rootEl.appendChild(dock);
     installCompactDockDrag(dock);
   }

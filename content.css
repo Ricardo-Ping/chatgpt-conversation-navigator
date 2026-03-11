@@ -203,7 +203,7 @@
 
 .cg-branch-map-root[data-minimal="true"] {
   width: 84px !important;
-  height: 300px !important;
+  height: 352px !important;
   border-radius: 14px;
 }
 
@@ -304,6 +304,7 @@
   flex-direction: column;
   gap: 8px;
   padding: 10px 8px;
+  overflow-y: auto;
 }
 
 .cg-branch-mini-dock-btn {
