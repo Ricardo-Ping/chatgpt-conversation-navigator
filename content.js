@@ -7,10 +7,12 @@
   const MESSAGE_SELECTORS = [
     '[data-message-author-role]',
     'article[data-testid^="conversation-turn-"]',
-    'main article'
+    'article[data-testid*="conversation-turn"]',
+    'main article',
+    'main [class*="conversation-turn"]'
   ];
   const VIEW_MODE = { MAP: "map", TREE: "tree" };
-  const PANEL = { minWidth: 330, maxWidth: 700, minHeight: 300, maxHeight: 860 };
+  const PANEL = { minWidth: 300, maxWidth: 760, minHeight: 260, maxHeight: 860 };
   const MAP_LAYOUT = { cardWidth: 220, cardHeight: 136, levelGap: 250, rowGap: 160, paddingX: 24, paddingY: 18 };
 
   let conversationId = getConversationId();
@@ -44,10 +46,13 @@
       selectedNodeId: null,
       collapsed: false,
       viewMode: VIEW_MODE.MAP,
+      mode: "lite",
+      liteOpen: true,
+      liteDock: { x: null, y: 180, side: "right" },
       autoRefresh: true,
       minimalMode: false,
       searchQuery: "",
-      panel: { width: 430, height: 540 },
+      panel: { width: 380, height: 500 },
       nodes: []
     };
   }
@@ -56,10 +61,17 @@
     if (!appState || typeof appState !== "object") appState = createEmptyState();
     if (!Array.isArray(appState.nodes)) appState.nodes = [];
     if (!appState.viewMode) appState.viewMode = VIEW_MODE.MAP;
+    if (!appState.mode) appState.mode = "lite";
+    if (typeof appState.liteOpen !== "boolean") appState.liteOpen = true;
+    if (!appState.liteDock || typeof appState.liteDock !== "object") {
+      appState.liteDock = { x: null, y: 180, side: "right" };
+    }
+    if (!["left", "right"].includes(appState.liteDock.side)) appState.liteDock.side = "right";
+    if (!Number.isFinite(appState.liteDock.y)) appState.liteDock.y = 180;
     if (typeof appState.autoRefresh !== "boolean") appState.autoRefresh = true;
-    if (!appState.panel) appState.panel = { width: 430, height: 540 };
-    appState.panel.width = clamp(Number(appState.panel.width) || 430, PANEL.minWidth, PANEL.maxWidth);
-    appState.panel.height = clamp(Number(appState.panel.height) || 540, PANEL.minHeight, PANEL.maxHeight);
+    if (!appState.panel) appState.panel = { width: 380, height: 500 };
+    appState.panel.width = clamp(Number(appState.panel.width) || 380, PANEL.minWidth, PANEL.maxWidth);
+    appState.panel.height = clamp(Number(appState.panel.height) || 500, PANEL.minHeight, PANEL.maxHeight);
     if (typeof appState.searchQuery !== "string") appState.searchQuery = "";
     if (typeof appState.minimalMode !== "boolean") appState.minimalMode = false;
     appState.nodes = appState.nodes.map((n) => ({
@@ -162,9 +174,19 @@
       });
     }
 
+    if (!candidates.length) {
+      document.querySelectorAll("main article").forEach((el) => {
+        if (seen.has(el)) return;
+        const text = cleanText(el.innerText || el.textContent || "");
+        if (!text) return;
+        seen.add(el);
+        candidates.push(el);
+      });
+    }
+
     const occurrences = new Map();
     return candidates.map((el, index) => {
-      const role = getRole(el);
+      const role = getRole(el) || (index % 2 === 0 ? "user" : "assistant");
       const text = cleanText(el.innerText || el.textContent || "");
       const hash = simpleHash(`${role}|${text.slice(0, 1500)}`);
       const count = (occurrences.get(hash) || 0) + 1;
@@ -188,6 +210,11 @@
     cachedMessages = findMessages();
     injectTagButtons(cachedMessages);
     syncNodesWithMessages(cachedMessages);
+    if (!cachedMessages.length) {
+      showToast("未扫描到消息，请先打开一条有内容的对话。");
+    } else {
+      showToast(`已扫描 ${cachedMessages.length} 条消息。`);
+    }
     render();
   }
 
@@ -400,30 +427,26 @@
 
   async function openBranchInCurrentTab() {
     const node = getSelectedNode();
-    if (!node) {
-      showToast("先选择一个节点再开分支。");
+    const baseMessage = node ? getMessageFromNode(node) : getViewportMessage();
+    if (!baseMessage) {
+      showToast("没有找到可用于开分支的消息。");
       return;
     }
-    const prompt = [
-      "请从这个历史节点继续，不要延续其它旁支。",
-      `节点标题：${node.title}`,
-      `节点类型：${typeLabel(node.type)}`,
-      `节点内容：${node.fullText || node.snippet}`,
-      "基于该节点后续继续。"
-    ].join("\n");
 
     const pending = {
       sourceConversationId: conversationId,
-      sourceNodeId: node.id,
-      prompt,
-      status: "awaiting_send",
+      sourceNodeId: node ? node.id : null,
+      sourceMessageKey: baseMessage.key,
+      status: "awaiting_child_url",
       createdAt: new Date().toISOString()
     };
-    await setGlobalStorage({
-      [GLOBAL_BRANCH_PENDING_KEY]: pending
-    });
-    showToast("正在同页打开分支...");
-    location.assign("https://chatgpt.com/");
+    const started = await triggerNativeBranch(baseMessage);
+    if (!started) {
+      showToast("未找到“新聊天中的分支”入口，ChatGPT 页面结构可能已变化。");
+      return;
+    }
+    await setGlobalStorage({ [GLOBAL_BRANCH_PENDING_KEY]: pending });
+    showToast("已触发原生分支，正在等待新会话创建...");
   }
 
   async function returnToParentConversation() {
@@ -452,20 +475,6 @@
       return;
     }
 
-    if (pending.status === "awaiting_send") {
-      if (conversationId !== "temporary-chat") {
-        return;
-      }
-      const sent = trySendPrompt(pending.prompt);
-      if (!sent) {
-        return;
-      }
-      pending.status = "awaiting_child_url";
-      pending.sentAt = new Date().toISOString();
-      await setGlobalStorage({ [GLOBAL_BRANCH_PENDING_KEY]: pending });
-      return;
-    }
-
     if (pending.status === "awaiting_child_url") {
       if (conversationId === "temporary-chat" || conversationId === pending.sourceConversationId) {
         return;
@@ -484,34 +493,62 @@
     }
   }
 
-  function trySendPrompt(prompt) {
-    const composer =
-      document.querySelector("textarea") ||
-      document.querySelector('[contenteditable=\"true\"][data-testid*=\"composer\"]') ||
-      document.querySelector('[contenteditable=\"true\"]');
-    if (!composer) {
+  function getMessageFromNode(node) {
+    if (!node) {
+      return null;
+    }
+    const byKey = cachedMessages.find((message) => message.key === node.messageKey);
+    if (byKey) {
+      return byKey;
+    }
+    return cachedMessages.find((message) => message.hash === node.messageHash && message.role === node.role) || null;
+  }
+
+  function getViewportMessage() {
+    if (!cachedMessages.length) {
+      return null;
+    }
+    const idx = getCurrentViewportMessageIndex();
+    return cachedMessages[idx] || cachedMessages[cachedMessages.length - 1];
+  }
+
+  async function triggerNativeBranch(message) {
+    if (!message || !message.element) {
       return false;
     }
+    const host = getButtonHost(message.element) || message.element;
 
-    if (composer.tagName === "TEXTAREA") {
-      composer.focus();
-      composer.value = prompt;
-      composer.dispatchEvent(new Event("input", { bubbles: true }));
-    } else {
-      composer.focus();
-      composer.textContent = prompt;
-      composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: prompt }));
+    const moreBtn = host.querySelector('button[aria-label*="更多"],button[aria-label*="More"],button[data-testid*="more"],button[id*="radix-"][aria-haspopup="menu"]');
+    if (moreBtn) {
+      moreBtn.click();
+      await wait(120);
+      const nativeItem = findNativeBranchMenuItem();
+      if (nativeItem) {
+        nativeItem.click();
+        return true;
+      }
     }
 
-    const sendButton =
-      document.querySelector('button[data-testid=\"send-button\"]') ||
-      document.querySelector('button[aria-label*=\"Send\"]') ||
-      document.querySelector('button[aria-label*=\"发送\"]');
-    if (!sendButton) {
-      return false;
+    host.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: host.getBoundingClientRect().left + 16, clientY: host.getBoundingClientRect().top + 16 }));
+    await wait(120);
+    const fallbackItem = findNativeBranchMenuItem();
+    if (fallbackItem) {
+      fallbackItem.click();
+      return true;
     }
-    sendButton.click();
-    return true;
+    return false;
+  }
+
+  function findNativeBranchMenuItem() {
+    const items = Array.from(document.querySelectorAll('[role="menuitem"],button,div'));
+    return items.find((el) => {
+      const txt = cleanText(el.textContent || "");
+      return /新聊天中的分支|Branch in new chat/i.test(txt);
+    }) || null;
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   async function maybeApplyReturnTarget() {
@@ -537,10 +574,15 @@
     if (!rootEl) return;
 
     mapRuntime = null;
+    if (appState.mode === "lite") {
+      renderLiteMode();
+      return;
+    }
     if (appState.minimalMode) {
       renderMinimalDock();
       return;
     }
+    rootEl.classList.remove("cg-lite-root");
     rootEl.dataset.collapsed = String(Boolean(appState.collapsed));
     rootEl.dataset.minimal = "false";
     rootEl.style.width = `${appState.panel.width}px`;
@@ -572,6 +614,12 @@
       createHeaderButton("建树", "build", () => autoBuildTree()),
       createHeaderButton("开分支", "branch", () => openBranchInCurrentTab()),
       createHeaderButton("返回父", "back", () => returnToParentConversation()),
+      createHeaderButton("轻量", "lite", async () => {
+        appState.mode = "lite";
+        appState.minimalMode = false;
+        await saveState();
+        render();
+      }),
       createHeaderButton("极简", "minimal", async () => {
         appState.minimalMode = true;
         await saveState();
@@ -641,12 +689,174 @@
 
     rootEl.appendChild(body);
     if (!appState.collapsed) {
-      const handle = document.createElement("div");
-      handle.className = "cg-branch-resize-handle";
-      handle.title = "拖动调整面板大小";
-      rootEl.appendChild(handle);
-      installResizeHandle(handle);
+      installResizeHandles();
     }
+  }
+
+  function renderLiteMode() {
+    rootEl.classList.add("cg-lite-root");
+    rootEl.classList.toggle("cg-lite-left", appState.liteDock.side === "left");
+    rootEl.classList.toggle("cg-lite-right", appState.liteDock.side !== "left");
+    rootEl.dataset.collapsed = "false";
+    rootEl.dataset.minimal = "false";
+    rootEl.innerHTML = "";
+    rootEl.style.width = "auto";
+    rootEl.style.height = "auto";
+    rootEl.style.top = `${clamp(appState.liteDock.y, 12, Math.max(12, window.innerHeight - 70))}px`;
+    rootEl.style.left = "";
+    rootEl.style.right = "";
+    if (appState.liteDock.side === "left") {
+      rootEl.style.left = "12px";
+    } else {
+      rootEl.style.right = "12px";
+    }
+
+    const eye = document.createElement("button");
+    eye.type = "button";
+    eye.className = "cg-lite-eye";
+    eye.title = appState.liteOpen ? "隐藏问题栏" : "显示问题栏";
+    eye.textContent = appState.liteOpen ? "🙈" : "👁";
+    eye.onclick = async () => {
+      if (eye.dataset.dragMoved === "true") {
+        eye.dataset.dragMoved = "false";
+        return;
+      }
+      appState.liteOpen = !appState.liteOpen;
+      await saveState();
+      render();
+    };
+    rootEl.appendChild(eye);
+    installLiteEyeDrag(eye);
+
+    if (!appState.liteOpen) return;
+
+    const panel = document.createElement("div");
+    panel.className = "cg-lite-panel";
+
+    const head = document.createElement("div");
+    head.className = "cg-lite-head";
+    const title = document.createElement("div");
+    title.className = "cg-lite-title";
+    title.innerHTML = "<strong>问题栏</strong><span>快速定位提问点</span>";
+
+    const actions = document.createElement("div");
+    actions.className = "cg-lite-actions";
+    const refresh = document.createElement("button");
+    refresh.type = "button";
+    refresh.className = "cg-lite-btn";
+    refresh.textContent = "扫描";
+    refresh.onclick = () => scanMessages();
+
+    const advanced = document.createElement("button");
+    advanced.type = "button";
+    advanced.className = "cg-lite-btn";
+    advanced.textContent = "高级";
+    advanced.onclick = async () => {
+      appState.mode = "advanced";
+      await saveState();
+      render();
+    };
+    actions.append(refresh, advanced);
+    head.append(title, actions);
+    panel.appendChild(head);
+
+    const quick = document.createElement("div");
+    quick.className = "cg-lite-quick";
+    const topBtn = document.createElement("button");
+    topBtn.type = "button";
+    topBtn.className = "cg-lite-quick-btn";
+    topBtn.textContent = "顶部";
+    topBtn.onclick = () => scrollChatTo(0);
+    const bottomBtn = document.createElement("button");
+    bottomBtn.type = "button";
+    bottomBtn.className = "cg-lite-quick-btn";
+    bottomBtn.textContent = "底部";
+    bottomBtn.onclick = () => scrollChatTo("bottom");
+    quick.append(topBtn, bottomBtn);
+    panel.appendChild(quick);
+
+    const list = document.createElement("div");
+    list.className = "cg-lite-list";
+    const questions = extractQuestionMessages();
+    if (!questions.length) {
+      const empty = document.createElement("div");
+      empty.className = "cg-lite-empty";
+      empty.textContent = "暂无问题，点击“扫描”更新。";
+      list.appendChild(empty);
+    } else {
+      questions.forEach((message, index) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "cg-lite-item";
+        item.title = cleanText(message.text).slice(0, 200);
+        item.innerHTML = `<span>${index + 1}</span><strong>${escapeHtml(autoTitle(message.text, message.role))}</strong>`;
+        item.onclick = () => jumpToMessage(message);
+        list.appendChild(item);
+      });
+    }
+    panel.appendChild(list);
+    rootEl.appendChild(panel);
+  }
+
+  function extractQuestionMessages() {
+    const messages = cachedMessages.length ? cachedMessages : findMessages();
+    return messages.filter((message) => {
+      if (message.role !== "user") return false;
+      const text = cleanText(message.text);
+      if (!text) return false;
+      return /[?？]|\b(怎么|如何|为什么|是否|能否|请问|what|how|why|can|could)\b/i.test(text.slice(0, 220));
+    });
+  }
+
+  function installLiteEyeDrag(eyeEl) {
+    eyeEl.style.touchAction = "none";
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let startTop = 0;
+
+    eyeEl.onpointerdown = (event) => {
+      if (event.button !== 0) return;
+      dragging = false;
+      startX = event.clientX;
+      startY = event.clientY;
+      startTop = clamp(appState.liteDock.y, 12, Math.max(12, window.innerHeight - 70));
+      eyeEl.setPointerCapture(event.pointerId);
+      eyeEl.classList.add("cg-lite-eye-dragging");
+
+      const onMove = (mv) => {
+        dragging = true;
+        const nextTop = clamp(startTop + (mv.clientY - startY), 12, Math.max(12, window.innerHeight - 70));
+        rootEl.style.top = `${nextTop}px`;
+        if (mv.clientX < window.innerWidth / 2) {
+          rootEl.style.left = "12px";
+          rootEl.style.right = "";
+        } else {
+          rootEl.style.left = "";
+          rootEl.style.right = "12px";
+        }
+      };
+
+      const onUp = async (up) => {
+        eyeEl.classList.remove("cg-lite-eye-dragging");
+        eyeEl.removeEventListener("pointermove", onMove);
+        eyeEl.removeEventListener("pointerup", onUp);
+        eyeEl.removeEventListener("pointercancel", onUp);
+
+        if (!dragging) return;
+        eyeEl.dataset.dragMoved = "true";
+        const snappedSide = up.clientX < window.innerWidth / 2 ? "left" : "right";
+        const snappedTop = clamp(startTop + (up.clientY - startY), 12, Math.max(12, window.innerHeight - 70));
+        appState.liteDock.side = snappedSide;
+        appState.liteDock.y = snappedTop;
+        await saveState();
+        render();
+      };
+
+      eyeEl.addEventListener("pointermove", onMove);
+      eyeEl.addEventListener("pointerup", onUp);
+      eyeEl.addEventListener("pointercancel", onUp);
+    };
   }
 
   function renderMinimalDock() {
@@ -685,13 +895,13 @@
     prev.type = "button";
     prev.className = "cg-branch-mini-dock-btn";
     prev.textContent = "上";
-    prev.onclick = () => jumpNeighborNode(-1);
+    prev.onclick = () => jumpNeighborMessage(-1);
 
     const next = document.createElement("button");
     next.type = "button";
     next.className = "cg-branch-mini-dock-btn";
     next.textContent = "下";
-    next.onclick = () => jumpNeighborNode(1);
+    next.onclick = () => jumpNeighborMessage(1);
 
     dock.append(expand, branch, back, prev, next);
     rootEl.appendChild(dock);
@@ -708,31 +918,31 @@
     toTop.type = "button";
     toTop.className = "cg-branch-nav-btn";
     toTop.textContent = "顶部";
-    toTop.onclick = () => window.scrollTo({ top: 0, behavior: "smooth" });
+    toTop.onclick = () => scrollChatTo(0);
 
     const toBottom = document.createElement("button");
     toBottom.type = "button";
     toBottom.className = "cg-branch-nav-btn";
     toBottom.textContent = "底部";
-    toBottom.onclick = () => window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+    toBottom.onclick = () => scrollChatTo("bottom");
 
     const prevNode = document.createElement("button");
     prevNode.type = "button";
     prevNode.className = "cg-branch-nav-btn";
-    prevNode.textContent = "上一节点";
-    prevNode.onclick = () => jumpNeighborNode(-1);
+    prevNode.textContent = "上一条";
+    prevNode.onclick = () => jumpNeighborMessage(-1);
 
     const nextNode = document.createElement("button");
     nextNode.type = "button";
     nextNode.className = "cg-branch-nav-btn";
-    nextNode.textContent = "下一节点";
-    nextNode.onclick = () => jumpNeighborNode(1);
+    nextNode.textContent = "下一条";
+    nextNode.onclick = () => jumpNeighborMessage(1);
 
     actions.append(toTop, toBottom, prevNode, nextNode);
     wrap.appendChild(actions);
 
     const rail = document.createElement("div");
-    rail.className = "cg-branch-nav-rail";
+    rail.className = "cg-branch-nav-rail-vertical";
     if (!cachedMessages.length) {
       rail.innerHTML = "<div class='cg-branch-nav-empty'>暂无消息导航</div>";
       wrap.appendChild(rail);
@@ -743,14 +953,14 @@
     const currentIndex = getCurrentViewportMessageIndex();
     const total = cachedMessages.length;
 
-    const sampleLimit = 70;
+    const sampleLimit = 90;
     const step = Math.max(1, Math.ceil(total / sampleLimit));
     for (let i = 0; i < total; i += step) {
       const message = cachedMessages[i];
       const marker = document.createElement("button");
       marker.type = "button";
       marker.className = "cg-branch-nav-marker";
-      marker.style.left = `${Math.round((i / Math.max(1, total - 1)) * 100)}%`;
+      marker.style.top = `${Math.round((i / Math.max(1, total - 1)) * 100)}%`;
       marker.title = `${i + 1}/${total} ${message.role === "assistant" ? "回答" : "提问"}: ${cleanText(message.text).slice(0, 56)}`;
       marker.dataset.role = message.role;
       if (nodeKeys.has(message.key)) {
@@ -763,10 +973,28 @@
       rail.appendChild(marker);
     }
 
+    const overview = document.createElement("div");
+    overview.className = "cg-branch-nav-overview";
+    const overviewTitle = document.createElement("div");
+    overviewTitle.className = "cg-branch-nav-overview-title";
+    overviewTitle.textContent = "对话概述";
+    overview.appendChild(overviewTitle);
+    const previewCount = Math.min(6, cachedMessages.length);
+    for (let i = 0; i < previewCount; i += 1) {
+      const message = cachedMessages[i];
+      const line = document.createElement("button");
+      line.type = "button";
+      line.className = "cg-branch-nav-overview-item";
+      line.textContent = `${i + 1}. ${autoTitle(message.text, message.role)}`;
+      line.title = cleanText(message.text).slice(0, 140);
+      line.onclick = () => jumpToMessage(message);
+      overview.appendChild(line);
+    }
+
     const summary = document.createElement("div");
     summary.className = "cg-branch-nav-summary";
     summary.textContent = `消息 ${total} 条`;
-    wrap.append(rail, summary);
+    wrap.append(rail, overview, summary);
     return wrap;
   }
 
@@ -774,13 +1002,18 @@
     if (!cachedMessages.length) {
       return 0;
     }
-    const centerY = window.scrollY + window.innerHeight / 2;
+    const container = getChatScrollContainer();
+    const centerY = container === window
+      ? window.scrollY + window.innerHeight / 2
+      : container.scrollTop + container.clientHeight / 2;
     let bestIndex = 0;
     let bestDistance = Number.MAX_SAFE_INTEGER;
 
     cachedMessages.forEach((message, index) => {
       const rect = message.element.getBoundingClientRect();
-      const absCenter = window.scrollY + rect.top + rect.height / 2;
+      const absCenter = container === window
+        ? window.scrollY + rect.top + rect.height / 2
+        : container.scrollTop + (rect.top - container.getBoundingClientRect().top) + rect.height / 2;
       const distance = Math.abs(absCenter - centerY);
       if (distance < bestDistance) {
         bestDistance = distance;
@@ -788,6 +1021,54 @@
       }
     });
     return bestIndex;
+  }
+
+  function getChatScrollContainer() {
+    const probe = cachedMessages[0] ? cachedMessages[0].element : null;
+    if (probe) {
+      let parent = probe.parentElement;
+      while (parent) {
+        const style = window.getComputedStyle(parent);
+        const canScroll = /(auto|scroll)/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight + 40;
+        if (canScroll) {
+          return parent;
+        }
+        parent = parent.parentElement;
+      }
+    }
+
+    const candidates = Array.from(document.querySelectorAll("main, div, section")).filter((el) => {
+      const style = window.getComputedStyle(el);
+      return /(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight + 80;
+    });
+    if (candidates.length) {
+      candidates.sort((a, b) => b.scrollHeight - a.scrollHeight);
+      return candidates[0];
+    }
+    return window;
+  }
+
+  function scrollChatTo(target) {
+    const container = getChatScrollContainer();
+    const maxTop = container === window
+      ? Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
+      : Math.max(0, container.scrollHeight - container.clientHeight);
+    const top = target === "bottom" ? maxTop : 0;
+    if (container === window) {
+      window.scrollTo({ top, behavior: "smooth" });
+      return;
+    }
+    container.scrollTo({ top, behavior: "smooth" });
+  }
+
+  function jumpNeighborMessage(direction) {
+    if (!cachedMessages.length) {
+      showToast("暂无消息可跳转。");
+      return;
+    }
+    const current = getCurrentViewportMessageIndex();
+    const next = clamp(current + direction, 0, cachedMessages.length - 1);
+    jumpToMessage(cachedMessages[next]);
   }
 
   function jumpNeighborNode(direction) {
@@ -815,8 +1096,20 @@
     flashMessage(message.element);
   }
 
-  function installResizeHandle(handle) {
+  function installResizeHandles() {
+    const directions = ["n", "s", "w", "e", "nw", "ne", "sw", "se"];
+    directions.forEach((direction) => {
+      const handle = document.createElement("div");
+      handle.className = `cg-branch-resize-handle cg-branch-resize-${direction}`;
+      handle.title = "拖动调整面板大小";
+      rootEl.appendChild(handle);
+      installResizeHandle(handle, direction);
+    });
+  }
+
+  function installResizeHandle(handle, direction) {
     handle.onpointerdown = (event) => {
+      event.preventDefault();
       const startX = event.clientX;
       const startY = event.clientY;
       const startWidth = appState.panel.width;
@@ -824,8 +1117,18 @@
       handle.setPointerCapture(event.pointerId);
 
       const onMove = (mv) => {
-        appState.panel.width = clamp(startWidth - (mv.clientX - startX), PANEL.minWidth, PANEL.maxWidth);
-        appState.panel.height = clamp(startHeight + (mv.clientY - startY), PANEL.minHeight, PANEL.maxHeight);
+        const dx = mv.clientX - startX;
+        const dy = mv.clientY - startY;
+        let nextWidth = startWidth;
+        let nextHeight = startHeight;
+
+        if (direction.includes("w")) nextWidth = startWidth - dx;
+        if (direction.includes("e")) nextWidth = startWidth + dx;
+        if (direction.includes("n")) nextHeight = startHeight - dy;
+        if (direction.includes("s")) nextHeight = startHeight + dy;
+
+        appState.panel.width = clamp(nextWidth, PANEL.minWidth, PANEL.maxWidth);
+        appState.panel.height = clamp(nextHeight, PANEL.minHeight, PANEL.maxHeight);
         rootEl.style.width = `${appState.panel.width}px`;
         rootEl.style.height = `${appState.panel.height}px`;
       };
@@ -942,6 +1245,10 @@
     el.dataset.selected = String(node.id === appState.selectedNodeId);
     el.title = node.fullText || node.snippet || node.title;
 
+    const grip = document.createElement("div");
+    grip.className = "cg-branch-map-node-grip";
+    grip.textContent = "⋮⋮ 拖拽";
+
     const header = document.createElement("div");
     header.className = "cg-branch-map-node-header";
     header.innerHTML = `<div class='cg-branch-map-node-title'>${escapeHtml(node.title)}</div><div class='cg-branch-map-node-role'>${escapeHtml(typeLabel(node.type))}</div>`;
@@ -986,7 +1293,7 @@
     };
 
     actions.append(foldBtn, jumpBtn, copyBtn);
-    el.append(header, snippet, actions);
+    el.append(grip, header, snippet, actions);
 
     el.onclick = async () => {
       if (appState.selectedNodeId === node.id) return;
@@ -1000,6 +1307,7 @@
   }
 
   function installMapNodeDrag(el, node) {
+    el.style.touchAction = "none";
     el.onpointerdown = (event) => {
       if (event.button !== 0 || event.target.closest("button") || !mapRuntime) return;
 
