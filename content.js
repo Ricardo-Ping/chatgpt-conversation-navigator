@@ -955,7 +955,7 @@
     const host = getButtonHost(message.element) || message.element;
     const turnHost = host.closest("article") || host;
 
-    const clickBranchMenuItem = (item) => {
+    const clickBranchMenuItem = async (item) => {
       if (!item) return false;
       const anchor = item.closest("a[href]") || item.querySelector?.("a[href]");
       if (anchor && anchor.href) {
@@ -964,7 +964,7 @@
         return true;
       }
 
-      // 无 href 时，拦截可能的 window.open，转成同 tab 跳转
+      // 无 href 时，拦截可能的异步 window.open，统一转成同 tab 跳转
       const originalOpen = window.open;
       let capturedUrl = "";
       window.open = function patchedOpen(url, ...args) {
@@ -977,16 +977,56 @@
       };
       try {
         safeClick(item);
+        if (!capturedUrl) {
+          // 兼容某些菜单项必须键盘确认
+          const target = item.closest("[role='menuitem'],button,a,div") || item;
+          target.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+          target.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true, cancelable: true }));
+        }
+        const startAt = Date.now();
+        while (!capturedUrl && Date.now() - startAt < 1600) {
+          await wait(80);
+        }
       } finally {
         window.open = originalOpen;
       }
-      // 兼容某些菜单项必须键盘确认
       if (!capturedUrl) {
-        const target = item.closest("[role='menuitem'],button,a,div") || item;
-        target.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-        target.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true, cancelable: true }));
+        return false;
+      }
+      if (!location.href.includes(capturedUrl)) {
+        location.assign(capturedUrl);
       }
       return true;
+    };
+
+    const getLikelyMenuTriggers = (scopeEl) => {
+      const selectors = [
+        'button[aria-label*="更多"]',
+        'button[aria-label*="More"]',
+        'button[aria-label*="Actions"]',
+        'button[aria-label*="操作"]',
+        'button[data-testid*="more"]',
+        'button[data-testid*="actions"]',
+        'button[data-testid*="message-actions"]',
+        'button[id*="radix-"][aria-haspopup="menu"]',
+        '[role="button"][aria-haspopup="menu"]',
+        'button[aria-haspopup="menu"]'
+      ];
+      const matched = selectors.flatMap((selector) =>
+        Array.from(scopeEl.querySelectorAll(selector)).filter((el) => isElementActuallyVisible(el))
+      );
+      const unique = Array.from(new Set(matched));
+      const hostRect = host.getBoundingClientRect();
+      unique.sort((a, b) => {
+        const aRect = a.getBoundingClientRect();
+        const bRect = b.getBoundingClientRect();
+        const aLabel = cleanText(a.getAttribute("aria-label") || a.textContent || "");
+        const bLabel = cleanText(b.getAttribute("aria-label") || b.textContent || "");
+        const aScore = (/更多|more|actions|操作/i.test(aLabel) ? 1000 : 0) - Math.abs(aRect.bottom - hostRect.bottom) - Math.abs(aRect.right - hostRect.right);
+        const bScore = (/更多|more|actions|操作/i.test(bLabel) ? 1000 : 0) - Math.abs(bRect.bottom - hostRect.bottom) - Math.abs(bRect.right - hostRect.right);
+        return bScore - aScore;
+      });
+      return unique;
     };
 
     const tryOpenMenuAndClick = async (menuTrigger) => {
@@ -994,52 +1034,43 @@
       safeClick(menuTrigger);
       const startAt = Date.now();
       let item = null;
-      while (Date.now() - startAt < 1200) {
+      while (Date.now() - startAt < 1400) {
         item = findNativeBranchMenuItem();
         if (item) break;
         await wait(80);
       }
       if (item) {
-        return clickBranchMenuItem(item);
+        return await clickBranchMenuItem(item);
       }
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       return false;
     };
 
-    const selectors = [
-      'button[aria-label*="更多"]',
-      'button[aria-label*="More"]',
-      'button[aria-label*="Actions"]',
-      'button[aria-label*="操作"]',
-      'button[data-testid*="more"]',
-      'button[data-testid*="actions"]',
-      'button[data-testid*="message-actions"]',
-      'button[id*="radix-"][aria-haspopup="menu"]',
-      '[role="button"][aria-haspopup="menu"]',
-      'button[aria-haspopup="menu"]'
-    ];
-
-    for (const selector of selectors) {
-      const local = Array.from(turnHost.querySelectorAll(selector)).filter((el) => isElementActuallyVisible(el));
-      for (const trigger of local) {
-        if (await tryOpenMenuAndClick(trigger)) return true;
-      }
+    // Step 1: 优先在目标消息所在 turn 内找“更多”
+    const localTriggers = getLikelyMenuTriggers(turnHost);
+    for (const trigger of localTriggers) {
+      if (await tryOpenMenuAndClick(trigger)) return true;
     }
 
+    // Step 2: 鼠标进入后再尝试（ChatGPT 会延迟显示动作区）
     turnHost.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, cancelable: true }));
     await wait(220);
-    for (const selector of selectors) {
-      const local = Array.from(turnHost.querySelectorAll(selector)).filter((el) => isElementActuallyVisible(el));
-      for (const trigger of local) {
-        if (await tryOpenMenuAndClick(trigger)) return true;
-      }
+    const hoverTriggers = getLikelyMenuTriggers(turnHost);
+    for (const trigger of hoverTriggers) {
+      if (await tryOpenMenuAndClick(trigger)) return true;
+    }
+
+    // Step 3: 扩大到整页可见动作按钮兜底
+    const pageTriggers = getLikelyMenuTriggers(document);
+    for (const trigger of pageTriggers) {
+      if (await tryOpenMenuAndClick(trigger)) return true;
     }
 
     host.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: host.getBoundingClientRect().left + 16, clientY: host.getBoundingClientRect().top + 16 }));
     await wait(260);
     const fallbackItem = findNativeBranchMenuItem();
     if (fallbackItem) {
-      return clickBranchMenuItem(fallbackItem);
+      return await clickBranchMenuItem(fallbackItem);
     }
     return false;
   }
