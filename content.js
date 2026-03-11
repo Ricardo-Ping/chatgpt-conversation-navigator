@@ -565,6 +565,12 @@
     ) || null;
   }
 
+  function refreshTagButtons() {
+    const messages = cachedMessages.length ? cachedMessages : findMessages();
+    if (!messages.length) return;
+    injectTagButtons(messages);
+  }
+
   function removeNodeById(nodeId) {
     const target = appState.nodes.find((n) => n.id === nodeId);
     if (!target) return false;
@@ -584,6 +590,7 @@
       removeNodeById(existing.id);
       await saveState();
       render();
+      refreshTagButtons();
       flashMessage(message.element);
       showToast("已取消该节点。");
       return;
@@ -611,6 +618,7 @@
     appState.selectedNodeId = node.id;
     await saveState();
     render();
+    refreshTagButtons();
     flashMessage(message.element);
     showToast(selected ? "已创建子分支节点。" : "已创建根节点。");
   }
@@ -1278,6 +1286,13 @@
           const sub = document.createElement("button");
           sub.type = "button";
           sub.className = "cg-lite-item-sub";
+          if (findExistingNodeForMessage(group.assistant)) {
+            sub.dataset.node = "true";
+            const marker = document.createElement("span");
+            marker.className = "cg-lite-node-marker";
+            marker.textContent = "✦";
+            sub.appendChild(marker);
+          }
           const label = document.createElement("span");
           label.textContent = `ChatGPT：${autoTitle(group.assistant.text, group.assistant.role)}`;
           sub.appendChild(label);

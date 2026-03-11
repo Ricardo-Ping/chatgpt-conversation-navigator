@@ -215,6 +215,25 @@
   gap: 6px;
 }
 
+.cg-lite-item-sub[data-node="true"] {
+  border-color: rgba(38, 177, 152, 0.58);
+  background: rgba(38, 177, 152, 0.1);
+}
+
+.cg-lite-node-marker {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #1caa9f, #3b7fd6);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+
 .cg-lite-empty {
   border: 1px dashed rgba(74, 117, 180, 0.3);
   border-radius: 10px;
