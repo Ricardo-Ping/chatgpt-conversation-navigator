@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "ChatGPT Branch Map",
-  "version": "0.1.1",
+  "name": "ChatGPT Conversation Navigator",
+  "version": "0.1.2",
   "description": "Branch map and navigation tools for ChatGPT conversations.",
   "permissions": [
     "storage"
