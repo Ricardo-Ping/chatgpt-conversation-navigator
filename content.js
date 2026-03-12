@@ -327,7 +327,10 @@
 
     candidates.forEach((el, index) => {
       const role = getRole(el) || (index % 2 === 0 ? "user" : "assistant");
-      const text = readMessageText(el, role);
+      let text = readMessageText(el, role);
+      if (!text && hasMediaPayload(el)) {
+        text = role === "user" ? "图片提问" : (role === "assistant" ? "图片回复" : "图片消息");
+      }
       if (!text) return;
       const turnHost = el.closest && el.closest('article[data-testid^="conversation-turn-"],article[data-testid*="conversation-turn"]');
       const turnId = (turnHost && turnHost.getAttribute("data-testid")) || el.getAttribute("data-testid");
@@ -357,16 +360,6 @@
 
   function collectMessageCandidates() {
     const seen = new Set();
-    const turnContainers = [];
-
-    document.querySelectorAll('article[data-testid^="conversation-turn-"],article[data-testid*="conversation-turn"]').forEach((el) => {
-      const container = normalizeMessageContainer(el);
-      if (!container || seen.has(container)) return;
-      seen.add(container);
-      turnContainers.push(container);
-    });
-    if (turnContainers.length) return turnContainers;
-
     const roleContainers = [];
 
     document.querySelectorAll('[data-message-author-role]').forEach((el) => {
@@ -375,9 +368,19 @@
       seen.add(container);
       roleContainers.push(container);
     });
-    if (roleContainers.length) {
-      return roleContainers;
-    }
+    if (roleContainers.length) return roleContainers;
+
+    const turnContainers = [];
+
+    document.querySelectorAll('article[data-testid^="conversation-turn-"],article[data-testid*="conversation-turn"]').forEach((el) => {
+      const container = normalizeMessageContainer(el);
+      if (!container || seen.has(container)) return;
+      const roleChildren = container.querySelectorAll ? container.querySelectorAll("[data-message-author-role]") : [];
+      if (roleChildren.length > 1) return;
+      seen.add(container);
+      turnContainers.push(container);
+    });
+    if (turnContainers.length) return turnContainers;
 
     const unique = [];
     for (const selector of MESSAGE_SELECTORS) {
@@ -424,8 +427,9 @@
     if (!container.closest("main")) return null;
     if (!container || (container.closest && container.closest(`#${ROOT_ID}`))) return null;
     if (!isElementActuallyVisible(container)) return null;
-    const text = readMessageText(container);
-    if (!text) return null;
+    const roleHint = getRole(container);
+    const text = readMessageText(container, roleHint);
+    if (!text && !hasMediaPayload(container)) return null;
     return container;
   }
 
@@ -1572,14 +1576,36 @@
   function getNavigationGroups() {
     const messages = getNavigationMessages();
     const groups = [];
+    const mergeMessage = (base, extra) => {
+      if (!base) return extra;
+      const combined = cleanText(`${base.text || ""}\n${extra.text || ""}`);
+      return {
+        ...base,
+        text: combined || base.text || extra.text || "",
+        snippet: cleanText(`${base.snippet || base.text || ""}\n${extra.snippet || extra.text || ""}`) || base.snippet || extra.snippet || ""
+      };
+    };
     messages.forEach((message) => {
       if (message.role === "user") {
+        const lastUserGroup = groups[groups.length - 1];
+        if (lastUserGroup && lastUserGroup.user && !lastUserGroup.assistant) {
+          lastUserGroup.user = mergeMessage(lastUserGroup.user, message);
+          return;
+        }
         groups.push({ user: message, assistant: null });
         return;
       }
       const last = groups[groups.length - 1];
       if (last && last.user && !last.assistant) {
         last.assistant = message;
+        return;
+      }
+      if (last && last.assistant && !last.user) {
+        last.assistant = mergeMessage(last.assistant, message);
+        return;
+      }
+      if (last && last.user && last.assistant) {
+        last.assistant = mergeMessage(last.assistant, message);
         return;
       }
       groups.push({ user: null, assistant: message });
