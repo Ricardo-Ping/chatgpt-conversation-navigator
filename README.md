@@ -1,4 +1,5 @@
 # ChatGPT Conversation Navigator
+# CHatGPT对话导航栏
 
 这个插件是我用来解决 ChatGPT 长对话“找上下文麻烦、回看麻烦、分叉继续麻烦”的问题。
 
