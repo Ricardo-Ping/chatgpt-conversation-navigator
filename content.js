@@ -1885,7 +1885,15 @@
     bottomBtn.className = "cg-lite-quick-btn";
     bottomBtn.textContent = "底部";
     bottomBtn.onclick = () => scrollChatTo("bottom");
-    quick.append(topBtn, bottomBtn);
+    const conversationManagerBtn = document.createElement("button");
+    conversationManagerBtn.type = "button";
+    conversationManagerBtn.className = "cg-lite-quick-btn cg-conversation-manager-entry";
+    conversationManagerBtn.textContent = "会话管理";
+    conversationManagerBtn.title = "按时间筛选并批量管理 ChatGPT 网页聊天";
+    conversationManagerBtn.onclick = () => {
+      document.dispatchEvent(new CustomEvent("cgn:open-conversation-manager"));
+    };
+    quick.append(topBtn, bottomBtn, conversationManagerBtn);
     panel.appendChild(quick);
 
     const list = document.createElement("div");

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Conversation Navigator",
-  "version": "0.1.2",
-  "description": "Branch map and navigation tools for ChatGPT conversations.",
+  "version": "0.2.1",
+  "description": "Navigation, long-chat optimization, and batch conversation management for ChatGPT.",
   "permissions": [
     "storage"
   ],
@@ -18,6 +18,9 @@
       ],
       "js": [
         "lib/interact.min.js",
+        "conversation-manager-core.js",
+        "conversation-index-store.js",
+        "conversation-manager.js",
         "content.js"
       ],
       "css": [
