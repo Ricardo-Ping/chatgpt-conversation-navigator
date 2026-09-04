@@ -17,6 +17,8 @@
   const MAX_PAGES = 500;
   const CACHE_FRESH_MS = 2 * 60 * 1000;
   const LIST_BATCH_SIZE = 100;
+  const ACTIVE_SCHEDULED_STATUSES = new Set(["active", "scheduled", "pending", "enabled"]);
+  const NON_SCHEDULED_TASK_PATTERN = /pro[_ -]?mode|deep[_ -]?research|image[_ -]?(?:generation|gen)|imagegen|dall[ -]?e/i;
   const VIEW_CONFIG = Object.freeze({
     active: Object.freeze({ label: "未归档", primaryAction: "archive", primaryLabel: "归档", readOnly: false }),
     archived: Object.freeze({ label: "已归档", primaryAction: "restore", primaryLabel: "恢复", readOnly: false }),
@@ -94,7 +96,7 @@
       mutationReady = false;
       const auth = await bootstrap({ accountId, signal });
       if (archiveState === "scheduled") {
-        return loadScheduledView({ auth, mode, cachedRecords, checkpoints, signal, onProgress, onPage });
+        return loadScheduledView({ auth, signal, onProgress, onPage });
       }
       if (!["active", "archived"].includes(archiveState)) {
         throw new ChatHistoryError(`不支持的会话视图：${archiveState}`, 0, true);
@@ -184,20 +186,16 @@
       };
     }
 
-    async function loadScheduledView({ auth, mode, cachedRecords, checkpoints, signal, onProgress, onPage }) {
+    async function loadScheduledView({ auth, signal, onProgress, onPage }) {
       onProgress({ phase: "tasks", loaded: 0, total: null, label: "正在读取已安排会话…" });
       const scheduledResult = await loadScheduledTasks({
-        mode,
-        cachedRecords,
-        checkpoint: checkpoints?.main,
         signal,
         onProgress,
         onPage
       });
-      const cachedBase = (cachedRecords || []).filter((record) => record?.automation);
-      const records = mode === "full"
-        ? scheduledResult.records
-        : core.mergeConversations([cachedBase, scheduledResult.records]);
+      // The tasks endpoint is a mixed task feed. Its filtered result is the authority
+      // for this small read-only view, so stale v0.2.1 entries must never be merged back.
+      const records = scheduledResult.records;
       onProgress({
         phase: "done",
         loaded: records.length,
@@ -212,7 +210,7 @@
         protectionVerified: true,
         canMutate: false,
         compatible: true,
-        syncMode: mode,
+        syncMode: "full",
         checkpoints: { main: scheduledResult.checkpoint, projects: {} }
       };
     }
@@ -354,14 +352,12 @@
       return { rows, checkpoint: latestTimestamp };
     }
 
-    async function loadScheduledTasks({ mode, cachedRecords, checkpoint, signal, onProgress, onPage }) {
+    async function loadScheduledTasks({ signal, onProgress, onPage }) {
       const records = [];
-      const seenIds = new Set();
-      const cached = new Map((cachedRecords || []).map((record) => [record.id, record]));
       let cursor = null;
       let offset = 0;
       let expectedTotal = null;
-      let latestTimestamp = mode === "full" || !Number.isFinite(checkpoint) ? null : checkpoint;
+      let latestTimestamp = null;
       let previousPageSignature = null;
 
       for (let page = 0; page < MAX_PAGES; page += 1) {
@@ -371,33 +367,26 @@
         const payload = await requestJson(`/backend-api/tasks?${query}`, { signal });
         const tasks = validateScheduledTasks(payload);
         expectedTotal = Number.isFinite(Number(payload.total)) ? Number(payload.total) : expectedTotal;
-        const pageRecords = tasks.map(normalizeScheduledTask);
+        const pageRecords = tasks.filter(isActiveScheduledTask).map(normalizeScheduledTask);
         const pageSignature = pageRecords.map((record) => `${record.id}:${record.updatedAt || 0}`).join("|");
         if (page > 0 && pageSignature && pageSignature === previousPageSignature) {
           throw new ChatHistoryError("已安排接口分页没有向前推进，已安全停止同步。", 0, true);
         }
         previousPageSignature = pageSignature;
         for (const record of pageRecords) {
-          if (seenIds.has(record.id)) continue;
-          seenIds.add(record.id);
           records.push(record);
         }
+        const uniqueCount = new Set(records.map((record) => record.id)).size;
         latestTimestamp = maxTimestamp(pageRecords, latestTimestamp);
         onPage({ scope: "scheduled", records: pageRecords, checkpoint: latestTimestamp });
         onProgress({
           phase: "tasks",
-          loaded: records.length,
+          loaded: uniqueCount,
           total: expectedTotal,
           label: expectedTotal === null
-            ? `正在读取已安排会话 · ${records.length} 条…`
-            : `正在读取已安排会话 ${Math.min(records.length, expectedTotal)}/${expectedTotal}…`
+            ? `正在读取已安排会话 · ${uniqueCount} 条…`
+            : `正在读取已安排会话 · 已识别 ${uniqueCount} 条活动提醒…`
         });
-
-        const unchangedPage = pageRecords.length > 0 && pageRecords.every((record) => {
-          const previous = cached.get(record.id);
-          return previous && previous.updatedAt === record.updatedAt;
-        });
-        if (mode === "validate" || (mode === "incremental" && unchangedPage)) break;
 
         const nextCursor = payload.cursor ?? payload.next_cursor ?? payload.nextCursor;
         if (nextCursor !== undefined && nextCursor !== null && String(nextCursor) !== String(cursor)) {
@@ -436,6 +425,26 @@
         pinned: false,
         automation: true
       });
+    }
+
+    function isActiveScheduledTask(task) {
+      const status = String(task.status ?? task.state ?? "").trim().toLowerCase();
+      const explicitlyActive = ACTIVE_SCHEDULED_STATUSES.has(status)
+        || task.is_active === true
+        || task.enabled === true;
+      if (!explicitlyActive) return false;
+      const descriptors = [
+        task.task_id,
+        task.taskId,
+        task.type,
+        task.task_type,
+        task.taskType,
+        task.kind,
+        task.task_kind,
+        task.product,
+        task.source
+      ].filter((value) => typeof value === "string").join(" ");
+      return !task.image_gen_message && !NON_SCHEDULED_TASK_PATTERN.test(descriptors);
     }
 
     async function loadProjectConversations({ mode, cachedRecords, checkpoints = {}, signal, onProgress, onPage }) {
@@ -581,11 +590,16 @@
 
     async function mutateConversation(action, id, signal) {
       const path = `/backend-api/conversation/${encodeURIComponent(id)}`;
-      const method = action === "delete" ? "DELETE" : "PATCH";
-      const body = action === "delete" ? undefined : JSON.stringify({ is_archived: action === "archive" });
+      const method = "PATCH";
+      const body = JSON.stringify(action === "delete"
+        ? { is_visible: false }
+        : { is_archived: action === "archive" });
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const response = await requestRaw(path, { method, body, signal });
-        if (response.ok || (action === "delete" && response.status === 404)) return;
+        if (response.ok) {
+          if (action === "delete") await validateMutationResponse(response, action);
+          return;
+        }
         if (response.status === 401 || response.status === 403) {
           authContext = null;
           throw new ChatHistoryError("登录状态已失效，已停止后续操作。", response.status, true);
@@ -597,6 +611,31 @@
           continue;
         }
         throw responseError(response, `${actionLabel(action)}失败`);
+      }
+    }
+
+    async function validateMutationResponse(response, action) {
+      if (response.status === 204) return;
+      const contentType = String(response.headers?.get("content-type") || "").toLowerCase();
+      if (!contentType.includes("json")) {
+        throw new ChatHistoryError(`${actionLabel(action)}失败：服务器未返回可验证的确认结果。`, response.status);
+      }
+      let payload;
+      try {
+        payload = await response.json();
+      } catch {
+        throw new ChatHistoryError(`${actionLabel(action)}失败：服务器返回了无法解析的确认结果。`, response.status);
+      }
+      const targetStateConfirmed = action === "delete"
+        ? payload?.is_visible === false
+        : Object.prototype.hasOwnProperty.call(payload || {}, "is_archived")
+          && Boolean(payload.is_archived) === (action === "archive");
+      const targetStateConflicts = action === "delete"
+        && Object.prototype.hasOwnProperty.call(payload || {}, "is_visible")
+        && payload.is_visible !== false;
+      const confirmed = payload?.success === true || payload?.ok === true || targetStateConfirmed;
+      if (targetStateConflicts || !confirmed || payload?.success === false || payload?.ok === false || Boolean(payload?.error)) {
+        throw new ChatHistoryError(`${actionLabel(action)}失败：服务器未确认${actionLabel(action)}结果。`, response.status);
       }
     }
 
@@ -686,6 +725,13 @@
     return action === "archive" ? "归档" : action === "restore" ? "恢复" : "删除";
   }
 
+  function conversationRecordsEqual(first, second) {
+    if (first === second) return true;
+    if (!Array.isArray(first) || !Array.isArray(second) || first.length !== second.length) return false;
+    const fields = ["id", "title", "createdAt", "updatedAt", "archived", "pinned", "projectId", "automation", "temporary"];
+    return first.every((record, index) => fields.every((field) => record?.[field] === second[index]?.[field]));
+  }
+
   function createThrottledUpdater(callback, {
     interval = 100,
     now = () => Date.now(),
@@ -766,6 +812,7 @@
       ChatHistoryError,
       createChatHistoryRepository,
       createThrottledUpdater,
+      conversationRecordsEqual,
       getEmptyStateLabel
     });
   }
@@ -1050,11 +1097,16 @@
       }
       if (controller.signal.aborted) return;
       if (cached) {
-        state.records = cached.records;
         state.cacheSyncedAt = cached.syncedAt;
-        state.loadedViewKey = viewKey;
         state.syncMessage = `本地缓存 · 上次同步 ${formatSyncTime(cached.syncedAt)}`;
-        updateAll({ rebuildList: true });
+        const shouldHydrateCachedView = state.loadedViewKey !== viewKey || state.records.length === 0;
+        if (shouldHydrateCachedView) {
+          state.records = cached.records;
+          state.loadedViewKey = viewKey;
+          updateAll({ rebuildList: true });
+        } else {
+          updateAll();
+        }
       } else if (state.loadedViewKey !== viewKey) {
         state.records = [];
         state.loadedViewKey = viewKey;
@@ -1062,7 +1114,7 @@
         updateAll({ rebuildList: true });
       }
 
-      const mode = core.chooseSyncMode({
+      const selectedMode = core.chooseSyncMode({
         hasCache: Boolean(cached),
         syncedAt: cached?.syncedAt,
         now: Date.now(),
@@ -1070,6 +1122,7 @@
         forceIncremental,
         freshMs: CACHE_FRESH_MS
       });
+      const mode = requestedView === "scheduled" ? "full" : selectedMode;
       const viewLabel = requestedView === "scheduled" ? "已安排会话" : "聊天";
       state.syncMessage = mode === "full"
         ? (cached ? `正在全量校准${viewLabel}，当前继续显示本地缓存…` : `正在首次读取${viewLabel}…`)
@@ -1095,9 +1148,10 @@
       progressUpdater.flush();
       state.accounts = result.accounts;
       state.accountId = result.accountId;
-      const syncedRecords = mode === "full"
+      const syncedRecords = mode === "full" || requestedView === "scheduled"
         ? result.records
         : core.mergeConversations([[...streamedRecords.values()], result.records]);
+      const recordsChanged = !conversationRecordsEqual(state.records, syncedRecords);
       state.records = syncedRecords;
       state.loadedViewKey = `${result.accountId}:${requestedView}`;
       state.warnings = result.warnings;
@@ -1122,7 +1176,7 @@
       state.syncMessage = result.compatible
         ? `同步完成 · ${syncedRecords.length} 条${viewLabel} · ${formatSyncTime(syncedAt)}`
         : "需要全量刷新 · 当前接口兼容性检查未通过";
-      updateAll({ rebuildList: true, preserveScroll: true });
+      updateAll({ rebuildList: recordsChanged, preserveScroll: true });
     } catch (error) {
       if (!isAbortError(error)) {
         state.error = friendlyError(error);
@@ -1190,7 +1244,25 @@
         `未处理 ${result.unprocessed.length} 条`
       ];
       state.result = `${actionLabel(action)}完成：${details.join("，")}。ChatGPT 左侧栏可能需要刷新页面后同步。`;
-      if (result.fatalError) state.error = result.fatalError;
+      if (result.fatalError) {
+        state.error = result.fatalError;
+      } else if (result.failed.length) {
+        const recordTitles = new Map(affectedRecords.map((record) => [record.id, record.title]));
+        const failureGroups = new Map();
+        for (const item of result.failed) {
+          const message = item.message || "未知错误";
+          const titles = failureGroups.get(message) || [];
+          titles.push(recordTitles.get(item.id) || item.id);
+          failureGroups.set(message, titles);
+        }
+        const detailsByReason = [...failureGroups].map(([message, titles]) => {
+          const titleSummary = titles.length > 3
+            ? `${titles.slice(0, 3).join("、")}等 ${titles.length} 条`
+            : titles.join("、");
+          return `${titleSummary}：${message}`;
+        });
+        state.error = `失败详情：${detailsByReason.join("；")}。失败项已保持选中，可直接重试。`;
+      }
     } catch (error) {
       if (!isAbortError(error)) state.error = friendlyError(error);
     } finally {

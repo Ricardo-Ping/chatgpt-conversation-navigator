@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { webcrypto } = require("node:crypto");
 
-const { createConversationIndexStore, STORAGE_PREFIX } = require("../conversation-index-store.js");
+const { createConversationIndexStore, STORAGE_PREFIX, SCHEDULED_SOURCE_VERSION } = require("../conversation-index-store.js");
 
 function createMemoryStorage(initial = {}) {
   const values = structuredClone(initial);
@@ -70,6 +70,22 @@ test("discards incompatible or corrupt cache entries", async () => {
   storage.values[key].views.active.records = [];
   storage.values[key].views.active.checkpoints.projects = { project: "not-a-timestamp" };
   assert.equal(await store.read("account-a", "active"), null);
+});
+
+test("invalidates only the legacy scheduled cache when its task source changes", async () => {
+  const storage = createMemoryStorage();
+  const store = createConversationIndexStore({ storage, cryptoImpl: webcrypto, now: () => 1000 });
+  await store.write("account-a", "active", { records: [{ id: "chat", title: "普通聊天" }] });
+  await store.write("account-a", "scheduled", { records: [{ id: "stale", title: "错误任务", automation: true }] });
+  const key = await store.accountKey("account-a");
+  delete storage.values[key].scheduledSourceVersion;
+
+  assert.equal(await store.read("account-a", "scheduled"), null);
+  assert.deepEqual((await store.read("account-a", "active")).records.map((item) => item.id), ["chat"]);
+
+  await store.write("account-a", "scheduled", { records: [{ id: "valid", title: "活动提醒", automation: true }] });
+  assert.equal(storage.values[key].scheduledSourceVersion, SCHEDULED_SOURCE_VERSION);
+  assert.deepEqual((await store.read("account-a", "scheduled")).records.map((item) => item.id), ["valid"]);
 });
 
 test("moves or removes only successful batch records", async () => {

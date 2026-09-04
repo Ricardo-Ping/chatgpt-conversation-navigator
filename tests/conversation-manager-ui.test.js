@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { createThrottledUpdater, getEmptyStateLabel } = require("../conversation-manager.js");
+const { conversationRecordsEqual, createThrottledUpdater, getEmptyStateLabel } = require("../conversation-manager.js");
 
 test("progress updates are coalesced to at most one visible update per interval", () => {
   let clock = 0;
@@ -44,6 +44,8 @@ test("toolbar exposes fast incremental sync separately from full calibration", (
   const manager = fs.readFileSync(path.join(__dirname, "..", "conversation-manager.js"), "utf8");
   assert.match(manager, /createButton\("同步"[\s\S]*forceIncremental:\s*true/);
   assert.match(manager, /createButton\("全量"[\s\S]*forceFull:\s*true/);
+  assert.match(manager, /shouldHydrateCachedView[\s\S]*updateAll\(\{ rebuildList:\s*true \}\)[\s\S]*else\s*\{\s*updateAll\(\)/);
+  assert.match(manager, /mode === "full" \|\| requestedView === "scheduled"\s*\? result\.records/);
 });
 
 test("empty state leaves loading state and names the scheduled view accurately", () => {
@@ -51,4 +53,11 @@ test("empty state leaves loading state and names the scheduled view accurately",
   assert.equal(getEmptyStateLabel({ loading: false, view: "scheduled" }), "当前条件下没有已安排会话。");
   assert.equal(getEmptyStateLabel({ loading: false, query: "研究", view: "scheduled" }), "没有匹配的已安排会话。");
   assert.equal(getEmptyStateLabel({ loading: false, view: "active" }), "当前条件下没有聊天。");
+});
+
+test("unchanged sync records do not require rebuilding list rows", () => {
+  const records = [{ id: "one", title: "聊天", updatedAt: 1, archived: false, pinned: false, projectId: null, automation: false, temporary: false }];
+  assert.equal(conversationRecordsEqual(records, structuredClone(records)), true);
+  assert.equal(conversationRecordsEqual(records, [{ ...records[0], pinned: true }]), false);
+  assert.equal(conversationRecordsEqual(records, [...records, { ...records[0], id: "two" }]), false);
 });

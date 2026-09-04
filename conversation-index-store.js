@@ -7,6 +7,7 @@
 
   const SCHEMA_VERSION = 1;
   const STORAGE_PREFIX = "cgn_conversation_index_v1";
+  const SCHEDULED_SOURCE_VERSION = 2;
   const VALID_VIEWS = new Set(["active", "archived", "scheduled"]);
 
   function createConversationIndexStore({ storage, cryptoImpl = globalThis.crypto, now = () => Date.now() } = {}) {
@@ -31,6 +32,7 @@
       const stored = await storage.get(key);
       const bundle = stored?.[key];
       if (!isValidBundle(bundle)) return null;
+      if (archiveState === "scheduled" && bundle.scheduledSourceVersion !== SCHEDULED_SOURCE_VERSION) return null;
       const view = bundle.views?.[archiveState];
       if (!isValidView(view)) return null;
       return cloneView(view);
@@ -42,6 +44,7 @@
       const stored = await storage.get(key);
       const current = isValidBundle(stored?.[key]) ? stored[key] : emptyBundle();
       current.lastAccessedAt = now();
+      if (archiveState === "scheduled") current.scheduledSourceVersion = SCHEDULED_SOURCE_VERSION;
       current.views[archiveState] = sanitizeView(view);
       await storage.set({ [key]: current });
       return cloneView(current.views[archiveState]);
@@ -158,5 +161,5 @@
     return sanitizeView(view);
   }
 
-  return Object.freeze({ SCHEMA_VERSION, STORAGE_PREFIX, createConversationIndexStore });
+  return Object.freeze({ SCHEMA_VERSION, STORAGE_PREFIX, SCHEDULED_SOURCE_VERSION, createConversationIndexStore });
 });

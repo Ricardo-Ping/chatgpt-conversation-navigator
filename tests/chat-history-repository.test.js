@@ -126,10 +126,11 @@ test("scheduled view reads only the tasks endpoint instead of all conversations"
   const fixture = createFixtureFetch();
   const repository = createChatHistoryRepository({ fetchImpl: fixture.fetchImpl, sleep: async () => {} });
   const result = await repository.loadAll({ archiveState: "scheduled" });
-  assert.deepEqual(result.records.map((item) => item.id), ["scheduled-chat", "task:task-two"]);
+  assert.deepEqual(result.records.map((item) => item.id), ["scheduled-chat"]);
   assert.ok(result.records.every((item) => item.automation));
   assert.equal(result.canMutate, false);
   assert.equal(result.compatible, true);
+  assert.equal(result.syncMode, "full");
   assert.equal(fixture.calls.some((call) => call.url.includes("/backend-api/tasks")), true);
   assert.equal(fixture.calls.some((call) => call.url.includes("/backend-api/conversations")), false);
   assert.equal(fixture.calls.some((call) => call.url.includes("/backend-api/pins")), false);
@@ -144,13 +145,13 @@ test("scheduled view paginates tasks and rejects an incompatible task payload", 
       if (!parsed.searchParams.has("cursor")) {
         return jsonResponse({
           tasks: [
-            { task_id: "first", title: "任务一", updated_at: "2026-09-01T00:00:00Z" },
-            { id: "raw-task-id", title: "", updated_at: "2026-08-15T00:00:00Z" }
+            { task_id: "first", title: "任务一", status: "active", updated_at: "2026-09-01T00:00:00Z" },
+            { id: "raw-task-id", title: "", status: "scheduled", updated_at: "2026-08-15T00:00:00Z" }
           ],
           next_cursor: "page-two"
         });
       }
-      return jsonResponse({ tasks: [{ task_id: "second", title: "任务二", updated_at: "2026-08-01T00:00:00Z" }] });
+      return jsonResponse({ tasks: [{ task_id: "second", title: "任务二", status: "pending", updated_at: "2026-08-01T00:00:00Z" }] });
     }
     return fixture.fetchImpl(input, options);
   };
@@ -173,6 +174,58 @@ test("scheduled view paginates tasks and rejects an incompatible task payload", 
   );
 });
 
+test("scheduled view excludes completed background work and merges active reminders by conversation", async () => {
+  const fixture = createFixtureFetch();
+  const fetchImpl = async (input, options) => {
+    const parsed = new URL(String(input), "https://chatgpt.com");
+    if (parsed.pathname === "/backend-api/tasks") {
+      return jsonResponse({
+        tasks: [
+          { task_id: "task-a", conversation_id: "one-scheduled-chat", title: "晨间提醒", status: "active", updated_at: "2026-09-03T00:00:00Z" },
+          { task_id: "task-b", conversation_id: "one-scheduled-chat", title: "晚间提醒", status: "scheduled", updated_at: "2026-09-04T00:00:00Z" },
+          { task_id: "pro_mode_research", conversation_id: "research-chat", title: "Deep research", status: "active" },
+          { task_id: "image-job", conversation_id: "image-chat", title: "生成图片", status: "active", image_gen_message: { id: "image-message" } },
+          ...Array.from({ length: 8 }, (_, index) => ({
+            task_id: `completed-${index}`,
+            conversation_id: `completed-chat-${index}`,
+            title: `已完成任务 ${index}`,
+            status: "completed"
+          }))
+        ]
+      });
+    }
+    return fixture.fetchImpl(input, options);
+  };
+  const repository = createChatHistoryRepository({ fetchImpl, sleep: async () => {} });
+  const result = await repository.loadAll({
+    archiveState: "scheduled",
+    mode: "incremental",
+    cachedRecords: [{ id: "stale-completed", title: "旧错误缓存", automation: true }]
+  });
+  assert.deepEqual(result.records.map((record) => record.id), ["one-scheduled-chat"]);
+  assert.equal(result.records[0].title, "晚间提醒");
+  assert.equal(result.syncMode, "full");
+});
+
+test("scheduled task titles do not trigger background-task type filtering", async () => {
+  const fixture = createFixtureFetch();
+  const fetchImpl = async (input, options) => {
+    const parsed = new URL(String(input), "https://chatgpt.com");
+    if (parsed.pathname === "/backend-api/tasks") {
+      return jsonResponse({ tasks: [{
+        task_id: "ordinary-reminder",
+        conversation_id: "title-collision",
+        title: "提醒我查看 Pro Mode 图片生成结果",
+        status: "active"
+      }] });
+    }
+    return fixture.fetchImpl(input, options);
+  };
+  const repository = createChatHistoryRepository({ fetchImpl, sleep: async () => {} });
+  const result = await repository.loadAll({ archiveState: "scheduled" });
+  assert.deepEqual(result.records.map((record) => record.id), ["title-collision"]);
+});
+
 test("loads one selected account without merging account histories", async () => {
   const fixture = createFixtureFetch();
   const repository = createChatHistoryRepository({ fetchImpl: fixture.fetchImpl, sleep: async () => {} });
@@ -184,7 +237,7 @@ test("loads one selected account without merging account histories", async () =>
   assert.ok(historyCalls.every((call) => call.options.headers["ChatGPT-Account-Id"] === "account-b"));
 });
 
-test("batch mutations retry transient failures and treat a missing delete as complete", async () => {
+test("batch mutations retry transient failures and require a confirmed delete", async () => {
   const fixture = createFixtureFetch({
     mutation({ id, attempt }) {
       if (id === "retry-500" && attempt === 1) return emptyResponse(500);
@@ -196,9 +249,58 @@ test("batch mutations retry transient failures and treat a missing delete as com
   const repository = createChatHistoryRepository({ fetchImpl: fixture.fetchImpl, sleep: async () => {} });
   await repository.loadAll({ archiveState: "active" });
   const result = await repository.runBatch({ action: "delete", ids: ["retry-500", "retry-429", "gone"] });
-  assert.deepEqual(new Set(result.succeeded), new Set(["retry-500", "retry-429", "gone"]));
-  assert.equal(result.failed.length, 0);
+  assert.deepEqual(new Set(result.succeeded), new Set(["retry-500", "retry-429"]));
+  assert.deepEqual(result.failed.map((item) => item.id), ["gone"]);
   assert.equal(result.unprocessed.length, 0);
+  const writes = fixture.calls.filter((call) => call.url.includes("/backend-api/conversation/"));
+  assert.ok(writes.every((call) => call.options.method === "PATCH"));
+  assert.ok(writes.every((call) => JSON.parse(call.options.body).is_visible === false));
+});
+
+test("delete is not reported as successful when the server explicitly rejects it", async () => {
+  const fixture = createFixtureFetch({
+    mutation: () => jsonResponse({ success: false, error: "conversation remains visible" })
+  });
+  const repository = createChatHistoryRepository({ fetchImpl: fixture.fetchImpl, sleep: async () => {} });
+  await repository.loadAll({ archiveState: "active" });
+  const result = await repository.runBatch({ action: "delete", ids: ["still-there"] });
+  assert.deepEqual(result.succeeded, []);
+  assert.equal(result.failed.length, 1);
+  assert.match(result.failed[0].message, /服务器未确认删除/);
+});
+
+test("delete rejects ambiguous success responses and accepts an explicit visible-state confirmation", async () => {
+  const ambiguousFixture = createFixtureFetch({ mutation: () => jsonResponse({}) });
+  const ambiguousRepository = createChatHistoryRepository({ fetchImpl: ambiguousFixture.fetchImpl, sleep: async () => {} });
+  await ambiguousRepository.loadAll({ archiveState: "active" });
+  const ambiguous = await ambiguousRepository.runBatch({ action: "delete", ids: ["ambiguous"] });
+  assert.equal(ambiguous.failed.length, 1);
+  assert.match(ambiguous.failed[0].message, /服务器未确认删除/);
+
+  const confirmedFixture = createFixtureFetch({ mutation: () => jsonResponse({ is_visible: false }) });
+  const confirmedRepository = createChatHistoryRepository({ fetchImpl: confirmedFixture.fetchImpl, sleep: async () => {} });
+  await confirmedRepository.loadAll({ archiveState: "active" });
+  const confirmed = await confirmedRepository.runBatch({ action: "delete", ids: ["confirmed"] });
+  assert.deepEqual(confirmed.succeeded, ["confirmed"]);
+
+  const nonJsonFixture = createFixtureFetch({ mutation: () => emptyResponse(200, { "content-type": "text/plain" }) });
+  const nonJsonRepository = createChatHistoryRepository({ fetchImpl: nonJsonFixture.fetchImpl, sleep: async () => {} });
+  await nonJsonRepository.loadAll({ archiveState: "active" });
+  const nonJson = await nonJsonRepository.runBatch({ action: "delete", ids: ["non-json"] });
+  assert.equal(nonJson.failed.length, 1);
+  assert.match(nonJson.failed[0].message, /未返回可验证的确认结果/);
+});
+
+test("delete rejects a success flag that conflicts with the returned visible state", async () => {
+  const fixture = createFixtureFetch({
+    mutation: () => jsonResponse({ success: true, is_visible: true })
+  });
+  const repository = createChatHistoryRepository({ fetchImpl: fixture.fetchImpl, sleep: async () => {} });
+  await repository.loadAll({ archiveState: "active" });
+  const result = await repository.runBatch({ action: "delete", ids: ["still-visible"] });
+  assert.deepEqual(result.succeeded, []);
+  assert.equal(result.failed.length, 1);
+  assert.match(result.failed[0].message, /服务器未确认删除/);
 });
 
 test("authentication failure stops a batch safely", async () => {
